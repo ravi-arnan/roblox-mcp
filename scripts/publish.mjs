@@ -41,8 +41,8 @@ for (const dir of packageDirs) {
 const readmePath = join(rootDir, 'README.md');
 const readme = readFileSync(readmePath, 'utf8');
 const updatedReadme = readme.replace(
-  /<!-- VERSION_LINE -->\*\*v[\d.]+\*\*/,
-  `<!-- VERSION_LINE -->**v${version}**`
+  /<!-- VERSION_LINE -->\n\*\*v[\d.]+\*\*/,
+  `<!-- VERSION_LINE -->\n**v${version}**`
 );
 if (updatedReadme !== readme) {
   writeFileSync(readmePath, updatedReadme, 'utf8');
