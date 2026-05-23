@@ -77,6 +77,8 @@ bash.exe.stackdump
 # Fork-specific
 # SPEC.md is the internal engineering brief — not for the public repo.
 SPEC.md
+# Maintainer briefings for individual releases — same reason, kept local.
+MAINTAINER_BRIEFING.md
 # patches/ holds the historical Python hot-patch — superseded by the TS fork.
 patches/
 # references/ holds frozen upstream snapshots for diffing — not part of fork source.

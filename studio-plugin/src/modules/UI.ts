@@ -226,7 +226,9 @@ function init(pluginRef: Plugin) {
 
 	const screenGui = pluginRef.CreateDockWidgetPluginGuiAsync(
 		"MCPServerInterface",
-		new DockWidgetPluginGuiInfo(Enum.InitialDockState.Float, false, false, 300, 260, 260, 200),
+		// 3rd arg (initialEnabledShouldOverrideRestore=true) forces the dock closed
+		// at every Studio launch. User can still open via the toolbar button.
+		new DockWidgetPluginGuiInfo(Enum.InitialDockState.Float, false, true, 300, 260, 260, 200),
 	);
 	(screenGui as unknown as { Title: string }).Title = `MCP Server v${CURRENT_VERSION}`;
 

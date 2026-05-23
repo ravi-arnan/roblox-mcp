@@ -189,27 +189,18 @@ function startPlaytest(requestData: Record<string, unknown>) {
 }
 
 function stopPlaytest(_requestData: Record<string, unknown>) {
-	// Stop requests are normally intercepted by the server-peer edit-proxy in
-	// modules/ClientBroker - that proxy runs inside the play server DM, the
-	// only DM where StudioTestService:EndTest is legal. If we reach this
-	// handler the broker either hasn't started yet or there's no active
-	// playtest. Try EndTest directly as a fallback (works for manually
-	// started playtests where the server-peer plugin happens to be polling).
-	const endTest = StudioTestService as unknown as Instance & { EndTest(reason: string): void };
-	const [endOk, endErr] = pcall(() => {
-		endTest.EndTest("stopped_by_mcp");
-	});
-	if (endOk) {
-		return {
-			success: true,
-			output: [...outputBuffer],
-			outputCount: outputBuffer.size(),
-			message: "Playtest stopped via StudioTestService.",
-		};
-	}
-
+	// Server-side routing (tools/index.ts:stopPlaytest) sends /api/stop-playtest
+	// to the role="edit-proxy" instance whenever one is registered. This handler
+	// is only reached when there's no edit-proxy - i.e. no active playtest, or
+	// the play DMs haven't completed plugin auto-activation yet. Calling
+	// StudioTestService:EndTest from the edit DM is illegal ("can only be
+	// called from the server DataModel of a running Studio play session"), so
+	// don't try - return a clean "no active playtest" response instead.
 	return {
-		error: `stopPlaytest fell through to edit DM (broker should have handled it). EndTest reported: ${tostring(endErr)}`,
+		error: "No active playtest to stop (edit-proxy not registered).",
+		hint:
+			"If a playtest is running, the play-server DM may not have completed plugin auto-activation yet. " +
+			"Wait a moment and retry, or call execute_luau target=server with StudioTestService:EndTest as a manual fallback.",
 	};
 }
 

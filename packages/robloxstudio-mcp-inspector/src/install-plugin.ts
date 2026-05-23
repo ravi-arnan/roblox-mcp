@@ -5,14 +5,14 @@ import { IncomingMessage } from 'http';
 import { getPluginsFolder, handleVariantConflict } from '@chrrxs/robloxstudio-mcp-core';
 
 const REPO = 'chrrxs/robloxstudio-mcp';
-const ASSET_NAME = 'MCPPlugin.rbxmx';
-const OTHER_VARIANT = 'MCPInspectorPlugin.rbxmx';
+const ASSET_NAME = 'MCPInspectorPlugin.rbxmx';
+const OTHER_VARIANT = 'MCPPlugin.rbxmx';
 const TIMEOUT_MS = 30_000;
 const MAX_REDIRECTS = 5;
 
 function httpsGet(url: string): Promise<IncomingMessage> {
   return new Promise((resolve, reject) => {
-    const req = get(url, { headers: { 'User-Agent': 'robloxstudio-mcp' } }, resolve);
+    const req = get(url, { headers: { 'User-Agent': 'robloxstudio-mcp-inspector' } }, resolve);
     req.on('error', reject);
     req.setTimeout(TIMEOUT_MS, () => { req.destroy(new Error(`Request timed out after ${TIMEOUT_MS}ms`)); });
   });
@@ -59,23 +59,7 @@ async function fetchJson(url: string): Promise<unknown> {
   return JSON.parse(Buffer.concat(chunks).toString());
 }
 
-async function findDevRelease(): Promise<{ tag_name: string; assets: { name: string; browser_download_url: string }[] }> {
-  const releases = await fetchJson(`https://api.github.com/repos/${REPO}/releases?per_page=20`) as {
-    tag_name: string;
-    prerelease: boolean;
-    assets: { name: string; browser_download_url: string }[];
-  }[];
-  const prerelease = releases.find(
-    (r) => r.prerelease && r.assets.some((a) => a.name === ASSET_NAME),
-  );
-  if (!prerelease) {
-    throw new Error(`No prerelease found with ${ASSET_NAME}`);
-  }
-  return prerelease;
-}
-
 export async function installPlugin(): Promise<void> {
-  const dev = process.argv.includes('--dev');
   const replaceVariant = process.argv.includes('--replace-variant');
   const pluginsFolder = getPluginsFolder();
 
@@ -89,13 +73,11 @@ export async function installPlugin(): Promise<void> {
     replace: replaceVariant,
   });
 
-  console.log(dev ? 'Fetching latest dev prerelease...' : 'Fetching latest release...');
-  const release = dev
-    ? await findDevRelease()
-    : await fetchJson(`https://api.github.com/repos/${REPO}/releases/latest`) as {
-        tag_name: string;
-        assets: { name: string; browser_download_url: string }[];
-      };
+  console.log('Fetching latest release...');
+  const release = await fetchJson(`https://api.github.com/repos/${REPO}/releases/latest`) as {
+    tag_name: string;
+    assets: { name: string; browser_download_url: string }[];
+  };
 
   const asset = release.assets?.find((a) => a.name === ASSET_NAME);
   if (!asset) {

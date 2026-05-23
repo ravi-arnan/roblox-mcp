@@ -13,7 +13,7 @@
 | 1 | `detectRole` uses `IsRunMode()`, so every play-mode peer reports as `edit` | One-line swap to `IsRunning()` in `Communication.ts:21` |
 | 2 | Plugin only registers with MCP when user clicks Connect - invisible in play DMs | Auto-activate on load via `task.delay(2, ...)` orchestrator in `server/index.server.ts` |
 | 3 | `target=client-N` is structurally impossible - client peer can't `HttpService:RequestAsync` | Server-peer **broker pattern**: per-player proxies registered with role=`client`, dispatched via `ReplicatedStorage.__MCPClientBroker` `RemoteFunction:InvokeClient` ([ClientBroker.ts](studio-plugin/src/modules/ClientBroker.ts)) |
-| 4 | `stop_playtest` warns `__MCP_STOP__` hoping a `LogService.MessageOut` listener catches it - never works cross-DM | Server-peer **edit-proxy** races the real edit DM for `/api/stop-playtest` specifically, calls `StudioTestService:EndTest` from the play server DM where it's legal |
+| 4 | `stop_playtest` warns `__MCP_STOP__` hoping a `LogService.MessageOut` listener catches it - never works cross-DM | Server-peer **edit-proxy** registered with role=`edit-proxy`. MCP routes `/api/stop-playtest` to it exclusively so it can call `StudioTestService:EndTest` from the play server DM. Edit DM only handles stop as a "no active playtest" fallback (v2.8.1 fix) |
 
 All four are implemented in TypeScript under [studio-plugin/src/](studio-plugin/src/). The compiled `MCPPlugin.rbxmx` is attached to GitHub releases.
 
@@ -24,6 +24,12 @@ All four are implemented in TypeScript under [studio-plugin/src/](studio-plugin/
 1. Install the [Studio plugin](https://github.com/chrrxs/robloxstudio-mcp/releases) to your Plugins folder (or run `npx -y @chrrxs/robloxstudio-mcp@latest --install-plugin`)
 2. Enable **Allow HTTP Requests** in Experience Settings > Security
 3. Connect your AI:
+
+> **Custom Plugins folder?** Set `MCP_PLUGINS_DIR` before running `--install-plugin` to override the auto-detected path (custom Studio install, network share, etc.). Works on Windows, macOS, and WSL.
+>
+> ```bash
+> MCP_PLUGINS_DIR='/path/to/Roblox/Plugins' npx -y @chrrxs/robloxstudio-mcp@latest --install-plugin
+> ```
 
 **Claude Code:**
 ```bash
@@ -84,7 +90,13 @@ A lighter, **read-only** version that only exposes inspection tools. No writes, 
 
 **31 read-only tools:** `get_file_tree`, `search_files`, `get_place_info`, `get_services`, `search_objects`, `get_instance_properties`, `get_instance_children`, `search_by_property`, `get_class_info`, `get_project_structure`, `mass_get_property`, `get_script_source`, `grep_scripts`, `get_attributes`, `get_tags`, `get_tagged`, `get_selection`, `get_playtest_output`, `get_connected_instances`, `get_descendants`, `compare_instances`, `get_output_log`, `export_build`, `list_library`, `search_materials`, `get_build`, `search_assets`, `get_asset_details`, `get_asset_thumbnail`, `preview_asset`, `capture_screenshot`
 
-**Setup** - same plugin, just swap the package name:
+**Setup** - same plugin family, different rbxmx file. Install **only one variant at a time** - having `MCPPlugin.rbxmx` and `MCPInspectorPlugin.rbxmx` in `Plugins/` simultaneously causes double-registration with the MCP server and breaks per-peer routing. Use `--replace-variant` to swap atomically:
+
+```bash
+npx -y @chrrxs/robloxstudio-mcp-inspector@latest --install-plugin --replace-variant
+```
+
+Then wire up your MCP client:
 
 **Claude:**
 ```bash
@@ -133,7 +145,7 @@ gemini mcp add robloxstudio-inspector npx --trust -- -y @chrrxs/robloxstudio-mcp
 ---
 
 <!-- VERSION_LINE -->
-**v2.8.0** - based on boshyxd v2.7.0 + four plugin-side fixes
+**v2.8.1** - based on boshyxd v2.7.0 + four plugin-side fixes
 
 ## Building & releasing
 

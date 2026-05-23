@@ -94,7 +94,6 @@ function setupClientBroker() {
 		}
 		return identity<ExecuteResult>({ success: false, error: tostring(result) });
 	};
-	print("[MCPFork] client broker ready");
 }
 
 const proxyByPlayer = new Map<Player, ProxyEntry>();
@@ -141,19 +140,17 @@ function registerProxy(player: Player, rf: RemoteFunction) {
 	const body = HttpService.JSONDecode(res.Body) as ReadyResponseBody;
 	const assigned = body.assignedRole ?? "client";
 	proxyByPlayer.set(player, { instanceId: proxyId, role: assigned });
-	print(`[MCPFork] proxy ${assigned} -> ${player.Name}`);
 	task.spawn(pollProxy, proxyId, player, rf);
 }
 
 function startEditProxyLoop() {
 	task.spawn(() => {
 		const proxyId = HttpService.GenerateGUID(false);
-		const [ok, res] = postJson("/ready", { instanceId: proxyId, role: "edit" });
+		const [ok, res] = postJson("/ready", { instanceId: proxyId, role: "edit-proxy" });
 		if (!ok || !res || !res.Success) {
 			warn("[MCPFork] edit-proxy register failed");
 			return;
 		}
-		print("[MCPFork] edit-proxy ready (stop-playtest interceptor)");
 		while (true) {
 			const [okPoll, pollRes] = pcall(() =>
 				HttpService.RequestAsync({
@@ -210,7 +207,6 @@ function setupServerBroker() {
 		proxyByPlayer.clear();
 	});
 	startEditProxyLoop();
-	print("[MCPFork] server broker ready");
 }
 
 export = {

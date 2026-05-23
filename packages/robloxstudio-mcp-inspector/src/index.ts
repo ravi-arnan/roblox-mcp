@@ -1,16 +1,24 @@
 import { RobloxStudioMCPServer, getReadOnlyTools } from '@chrrxs/robloxstudio-mcp-core';
 import { createRequire } from 'module';
 
-const require = createRequire(import.meta.url);
-const { version: VERSION } = require('../package.json');
+if (process.argv.includes('--install-plugin')) {
+  const { installPlugin } = await import('./install-plugin.js');
+  installPlugin().catch((err) => {
+    console.error(err instanceof Error ? err.message : String(err));
+    process.exitCode = 1;
+  });
+} else {
+  const require = createRequire(import.meta.url);
+  const { version: VERSION } = require('../package.json');
 
-const server = new RobloxStudioMCPServer({
-  name: 'robloxstudio-mcp-inspector',
-  version: VERSION,
-  tools: getReadOnlyTools(),
-});
+  const server = new RobloxStudioMCPServer({
+    name: 'robloxstudio-mcp-inspector',
+    version: VERSION,
+    tools: getReadOnlyTools(),
+  });
 
-server.run().catch((error) => {
-  console.error('Server failed to start:', error);
-  process.exit(1);
-});
+  server.run().catch((error) => {
+    console.error('Server failed to start:', error);
+    process.exit(1);
+  });
+}
