@@ -751,6 +751,40 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
       required: ['code']
     }
   },
+  {
+    name: 'eval_server_runtime',
+    category: 'write',
+    description: 'Execute Luau on the server peer in the running game\'s Script VM (shares require cache with user game scripts). Use this instead of execute_luau target=server when you need to see runtime-mutated module state. Auto-installed at start_playtest, removed at stop_playtest. Requires ServerScriptService.LoadStringEnabled=true.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        code: {
+          type: 'string',
+          description: 'Luau code to execute. Use return ... to get a value back.'
+        }
+      },
+      required: ['code']
+    }
+  },
+  {
+    name: 'eval_client_runtime',
+    category: 'write',
+    description: 'Execute Luau on a client peer in the running game\'s LocalScript VM (shares require cache with user game scripts). Use this instead of execute_luau target=client-N when you need to see runtime-mutated module state. Auto-installed at start_playtest, removed at stop_playtest. Does not require LoadStringEnabled.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        code: {
+          type: 'string',
+          description: 'Luau code to execute. Use return ... to get a value back.'
+        },
+        target: {
+          type: 'string',
+          description: 'Client target: "client-1" (default), "client-2", etc.'
+        }
+      },
+      required: ['code']
+    }
+  },
 
   // === Script Search ===
   {

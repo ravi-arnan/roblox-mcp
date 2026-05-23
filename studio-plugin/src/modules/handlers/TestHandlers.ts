@@ -1,4 +1,5 @@
 import { HttpService, LogService } from "@rbxts/services";
+import { installBridges, cleanupBridges, loadStringEnabled } from "../EvalBridges";
 
 const StudioTestService = game.GetService("StudioTestService");
 const ServerScriptService = game.GetService("ServerScriptService");
@@ -154,6 +155,15 @@ function startPlaytest(requestData: Record<string, unknown>) {
 		warn(`[MCP] Failed to inject stop listener: ${injErr}`);
 	}
 
+	// Auto-install the game-VM eval bridges (ServerEvalBridge + ClientEvalBridge)
+	// so eval_server_runtime / eval_client_runtime work without manual setup.
+	// Bridges are cleaned up from the edit DM after the play DMs tear down.
+	const bridgeInstall = installBridges();
+	const hasLoadString = loadStringEnabled();
+	if (!bridgeInstall.installed) {
+		warn(`[MCP] Eval bridge install failed: ${bridgeInstall.error}`);
+	}
+
 	if (numPlayers !== undefined && mode === "run") {
 		const TestService = game.GetService("TestService") as TestService & { NumberOfPlayers: number };
 		TestService.NumberOfPlayers = math.clamp(numPlayers, 1, 8);
@@ -180,12 +190,31 @@ function startPlaytest(requestData: Record<string, unknown>) {
 		testRunning = false;
 
 		cleanupStopListener();
+		cleanupBridges();
 	});
 
 	const msg = numPlayers !== undefined
 		? `Playtest started in ${mode} mode with ${numPlayers} player(s)`
 		: `Playtest started in ${mode} mode`;
-	return { success: true, message: msg };
+
+	const response: Record<string, unknown> = {
+		success: true,
+		message: msg,
+		evalBridges: bridgeInstall.installed ? "installed" : `failed: ${bridgeInstall.error}`,
+	};
+
+	// Surface loadstring availability up-front so callers know whether
+	// eval_server_runtime will work before they try it. eval_client_runtime
+	// doesn't need loadstring (it uses ModuleScript+require), so this only
+	// affects the server bridge.
+	if (!hasLoadString) {
+		response.serverEvalNote =
+			"ServerScriptService.LoadStringEnabled is false. eval_server_runtime will not work " +
+			"until you enable it (ServerScriptService > Properties > LoadStringEnabled = true) " +
+			"and restart the playtest. eval_client_runtime is unaffected.";
+	}
+
+	return response;
 }
 
 function stopPlaytest(_requestData: Record<string, unknown>) {

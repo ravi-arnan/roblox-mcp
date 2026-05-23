@@ -17,6 +17,19 @@
 
 All four are implemented in TypeScript under [studio-plugin/src/](studio-plugin/src/). The compiled `MCPPlugin.rbxmx` is attached to GitHub releases.
 
+## New in v2.9.0: game-VM eval bridges
+
+`execute_luau target=server/client-N` runs in the plugin VM with a fresh `ModuleScript` each call — clean isolation, but means `require(SomeModule)` returns a fresh table, so runtime-mutated module state in the user's game scripts is invisible. The new `eval_server_runtime` / `eval_client_runtime` tools fix that by routing through bridge scripts (ported from [chrrxs/roblox-mcp-primitives](https://github.com/Chrrxs/roblox-mcp-primitives)) that the plugin auto-installs at `start_playtest` and removes at `stop_playtest`.
+
+| Tool | Runs in | Shares require cache with | Needs LoadStringEnabled? |
+|---|---|---|---|
+| `execute_luau target=server` | Server peer plugin VM | None (fresh per call) | No |
+| `eval_server_runtime` | Server peer **Script VM** | Running game's server scripts | **Yes** - clear error surfaced at start_playtest + per-call if disabled |
+| `execute_luau target=client-N` | Client peer plugin VM | None (fresh per call) | No |
+| `eval_client_runtime` | Client peer **LocalScript VM** | Running game's LocalScripts | No |
+
+Use the new tools when you need to inspect runtime-mutated module state (e.g., a `Net` library's cached internal counters). Use the originals when you want a clean sandbox or no playtest is running.
+
 ---
 
 ## Setup
@@ -145,7 +158,7 @@ gemini mcp add robloxstudio-inspector npx --trust -- -y @chrrxs/robloxstudio-mcp
 ---
 
 <!-- VERSION_LINE -->
-**v2.8.1** - based on boshyxd v2.7.0 + four plugin-side fixes
+**v2.9.0** - based on boshyxd v2.7.0 + four plugin-side fixes
 
 ## Building & releasing
 

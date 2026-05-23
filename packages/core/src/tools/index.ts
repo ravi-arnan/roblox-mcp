@@ -28,6 +28,22 @@ function encodePngFromRgbaResponse(response: RawImageCaptureResponse): Buffer {
   return rgbaToPng(rgbaBuffer, response.width, response.height);
 }
 
+// Names must match studio-plugin/src/modules/EvalBridges.ts BRIDGE_NAMES.
+// Hardcoded here because the core package can't import from studio-plugin.
+const SERVER_LOCAL_NAME = '__MCP_ServerEvalLocal';
+const CLIENT_LOCAL_NAME = '__MCP_ClientEvalBridge';
+
+// Wrap a Luau code string in a long bracket with enough '=' signs to never
+// collide with the contained text. Returns a string like `[==[ <code> ]==]`.
+function luaLongQuote(s: string): string {
+  let level = 0;
+  // Find the smallest level not present as a closing bracket inside s.
+  while (s.includes(`]${'='.repeat(level)}]`)) level++;
+  const eq = '='.repeat(level);
+  // Leading newline inside long brackets is consumed by Luau, which is fine.
+  return `[${eq}[\n${s}\n]${eq}]`;
+}
+
 export class RobloxStudioTools {
   private client: StudioHttpClient;
   private bridge: BridgeService;
@@ -648,6 +664,90 @@ export class RobloxStudioTools {
       throw new Error('Code is required for execute_luau');
     }
     const response = await this.client.request('/api/execute-luau', { code }, target || 'edit');
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(response)
+        }
+      ]
+    };
+  }
+
+  async evalServerRuntime(code: string) {
+    if (!code) {
+      throw new Error('Code is required for eval_server_runtime');
+    }
+    // The server-peer plugin invokes the bridge's BindableFunction in
+    // ServerScriptService. The bridge's loadstring runs in the running
+    // server's Script VM, so module require cache is shared with the
+    // user's game scripts.
+    const wrapper = `
+local bf = game:GetService("ServerScriptService"):FindFirstChild("${SERVER_LOCAL_NAME}")
+if not bf then
+\treturn {
+\t\tbridge = "missing",
+\t\terror = "ServerEvalBridge not installed. Bridges are auto-installed at start_playtest and removed at stop_playtest. Start a playtest before calling eval_server_runtime.",
+\t}
+end
+local USER_CODE = ${luaLongQuote(code)}
+local ok, result = bf:Invoke(USER_CODE)
+return {
+\tbridge = "ok",
+\tok = ok,
+\tresult = if result == nil then nil else tostring(result),
+}
+`;
+    const response = await this.client.request('/api/execute-luau', { code: wrapper }, 'server');
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(response)
+        }
+      ]
+    };
+  }
+
+  async evalClientRuntime(code: string, target?: string) {
+    if (!code) {
+      throw new Error('Code is required for eval_client_runtime');
+    }
+    const clientTarget = target || 'client-1';
+    if (!clientTarget.startsWith('client-')) {
+      throw new Error(`eval_client_runtime requires target=client-N (got: ${clientTarget})`);
+    }
+    // The client-peer plugin creates a fresh ModuleScript with the user's
+    // code as Source, then invokes the bridge's BindableFunction (which
+    // lives in the LocalScript VM). The bridge requires the ModuleScript,
+    // so the user code runs in the LocalScript VM and shares its require
+    // cache with the running game's LocalScripts.
+    const wrapper = `
+local bf = game:GetService("ReplicatedStorage"):FindFirstChild("${CLIENT_LOCAL_NAME}")
+if not bf then
+\treturn {
+\t\tbridge = "missing",
+\t\terror = "ClientEvalBridge not installed. Bridges are auto-installed at start_playtest and removed at stop_playtest. Start a playtest before calling eval_client_runtime.",
+\t}
+end
+local USER_CODE = ${luaLongQuote(code)}
+local m = Instance.new("ModuleScript")
+m.Name = "__MCPEvalPayload"
+local okSet, setErr = pcall(function() m.Source = USER_CODE end)
+if not okSet then
+\tm:Destroy()
+\treturn { bridge = "ok", ok = false, result = "ModuleScript Source set failed: " .. tostring(setErr) }
+end
+m.Parent = workspace
+local ok, result = bf:Invoke(m)
+m:Destroy()
+return {
+\tbridge = "ok",
+\tok = ok,
+\tresult = if result == nil then nil else tostring(result),
+}
+`;
+    const response = await this.client.request('/api/execute-luau', { code: wrapper }, clientTarget);
     return {
       content: [
         {
