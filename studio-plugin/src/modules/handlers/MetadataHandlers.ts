@@ -281,11 +281,55 @@ function executeLuau(requestData: Record<string, unknown>) {
 		oldWarn(...(args as [defined, ...defined[]]));
 	};
 
-	const [success, result] = pcall(() => {
+	// Try loadstring first (preserves print/warn interception). When
+	// ServerScriptService.LoadStringEnabled=false AND the plugin runs in a
+	// peer where the engine respects that gate (notably the play-server DM
+	// in some Studio configurations), loadstring either returns nil with a
+	// "loadstring() is not available" message OR throws that same message
+	// directly. Both paths must trigger the ModuleScript + require
+	// fallback. The fallback can't intercept print/warn since the
+	// ModuleScript runs in its own environment, so the output array stays
+	// empty in that branch - the playtest log buffer already captures
+	// prints separately via LogService.MessageOut.
+	const runViaModuleScript = () => {
+		const m = new Instance("ModuleScript");
+		m.Name = "__MCPExecLuauPayload";
+		const [okSet, setErr] = pcall(() => {
+			(m as unknown as { Source: string }).Source = code;
+		});
+		if (!okSet) {
+			m.Destroy();
+			error(`ModuleScript Source set failed: ${tostring(setErr)}`);
+		}
+		m.Parent = game.GetService("Workspace");
+		const [okReq, reqResult] = pcall(() => require(m));
+		m.Destroy();
+		if (!okReq) error(tostring(reqResult));
+		return reqResult;
+	};
+
+	const isLoadstringUnavailable = (err: unknown): boolean => {
+		const errStr = tostring(err);
+		const [matchStart] = string.find(errStr, "not available", 1, true);
+		return matchStart !== undefined;
+	};
+
+	let [success, result] = pcall(() => {
 		const [fn, compileError] = loadstring(code);
-		if (!fn) error(`Compile error: ${compileError}`);
+		if (!fn) {
+			if (isLoadstringUnavailable(compileError)) {
+				return runViaModuleScript();
+			}
+			error(`Compile error: ${compileError}`);
+		}
 		return fn();
 	});
+
+	// loadstring throws (not returns nil) in some plugin contexts when
+	// LoadStringEnabled=false. Catch that here as a second-chance fallback.
+	if (!success && isLoadstringUnavailable(result)) {
+		[success, result] = pcall(runViaModuleScript);
+	}
 
 	env["print"] = oldPrint;
 	env["warn"] = oldWarn;

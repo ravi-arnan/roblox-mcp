@@ -44,6 +44,41 @@ function luaLongQuote(s: string): string {
   return `[${eq}[\n${s}\n]${eq}]`;
 }
 
+// Parse the structured JSON result that eval_*_runtime wrappers return.
+// MetadataHandlers.executeLuau wraps the wrapper's return in
+// `{ success, returnValue: tostring(result), output, message }`. Our
+// wrapper returns a JSON-encoded string, so returnValue is the JSON.
+// Decode it back into a structured object for the MCP response. If
+// anything's off (no returnValue, parse fails, execute_luau itself
+// errored), fall back to relaying the raw response so the caller can see
+// what went wrong rather than a silent empty.
+type BridgeResponse = {
+  bridge?: 'ok' | 'missing';
+  ok?: boolean;
+  result?: string;
+  error?: string;
+};
+type ExecuteLuauResponse = {
+  success?: boolean;
+  returnValue?: unknown;
+  output?: unknown;
+  message?: string;
+  error?: string;
+};
+function parseBridgeResponse(response: unknown): string {
+  const r = response as ExecuteLuauResponse;
+  if (r && typeof r.returnValue === 'string') {
+    try {
+      const parsed = JSON.parse(r.returnValue) as BridgeResponse;
+      return JSON.stringify(parsed);
+    } catch {
+      // returnValue wasn't valid JSON - the wrapper presumably errored before
+      // the JSONEncode return statement. Fall through to raw response.
+    }
+  }
+  return JSON.stringify(response);
+}
+
 export class RobloxStudioTools {
   private client: StudioHttpClient;
   private bridge: BridgeService;
@@ -682,28 +717,34 @@ export class RobloxStudioTools {
     // ServerScriptService. The bridge's loadstring runs in the running
     // server's Script VM, so module require cache is shared with the
     // user's game scripts.
+    //
+    // Wrapper JSON-encodes the result table because the underlying
+    // execute_luau handler tostring()s any non-string return - JSON-encoding
+    // here keeps structured fields {bridge, ok, result} intact across the
+    // wire. TS side parses returnValue back into a structured object.
     const wrapper = `
+local HttpService = game:GetService("HttpService")
 local bf = game:GetService("ServerScriptService"):FindFirstChild("${SERVER_LOCAL_NAME}")
 if not bf then
-\treturn {
+\treturn HttpService:JSONEncode({
 \t\tbridge = "missing",
 \t\terror = "ServerEvalBridge not installed. Bridges are auto-installed at start_playtest and removed at stop_playtest. Start a playtest before calling eval_server_runtime.",
-\t}
+\t})
 end
 local USER_CODE = ${luaLongQuote(code)}
 local ok, result = bf:Invoke(USER_CODE)
-return {
+return HttpService:JSONEncode({
 \tbridge = "ok",
 \tok = ok,
 \tresult = if result == nil then nil else tostring(result),
-}
+})
 `;
     const response = await this.client.request('/api/execute-luau', { code: wrapper }, 'server');
     return {
       content: [
         {
           type: 'text',
-          text: JSON.stringify(response)
+          text: parseBridgeResponse(response)
         }
       ]
     };
@@ -722,13 +763,16 @@ return {
     // lives in the LocalScript VM). The bridge requires the ModuleScript,
     // so the user code runs in the LocalScript VM and shares its require
     // cache with the running game's LocalScripts.
+    //
+    // Same JSON-encode dance as evalServerRuntime to preserve return shape.
     const wrapper = `
+local HttpService = game:GetService("HttpService")
 local bf = game:GetService("ReplicatedStorage"):FindFirstChild("${CLIENT_LOCAL_NAME}")
 if not bf then
-\treturn {
+\treturn HttpService:JSONEncode({
 \t\tbridge = "missing",
 \t\terror = "ClientEvalBridge not installed. Bridges are auto-installed at start_playtest and removed at stop_playtest. Start a playtest before calling eval_client_runtime.",
-\t}
+\t})
 end
 local USER_CODE = ${luaLongQuote(code)}
 local m = Instance.new("ModuleScript")
@@ -736,23 +780,23 @@ m.Name = "__MCPEvalPayload"
 local okSet, setErr = pcall(function() m.Source = USER_CODE end)
 if not okSet then
 \tm:Destroy()
-\treturn { bridge = "ok", ok = false, result = "ModuleScript Source set failed: " .. tostring(setErr) }
+\treturn HttpService:JSONEncode({ bridge = "ok", ok = false, result = "ModuleScript Source set failed: " .. tostring(setErr) })
 end
 m.Parent = workspace
 local ok, result = bf:Invoke(m)
 m:Destroy()
-return {
+return HttpService:JSONEncode({
 \tbridge = "ok",
 \tok = ok,
 \tresult = if result == nil then nil else tostring(result),
-}
+})
 `;
     const response = await this.client.request('/api/execute-luau', { code: wrapper }, clientTarget);
     return {
       content: [
         {
           type: 'text',
-          text: JSON.stringify(response)
+          text: parseBridgeResponse(response)
         }
       ]
     };

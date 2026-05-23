@@ -19,7 +19,18 @@
 // DataModel into the play DMs, so the scripts come along and run there.
 // TestHandlers cleans them up from the edit DM when ExecutePlayModeAsync
 // returns (test ended for any reason: stop_playtest, manual close, EndTest).
-// Both scripts have Archivable=false so a user save doesn't persist them.
+//
+// Archivable handling: ExecutePlayModeAsync's deep-clone SKIPS instances
+// with Archivable=false (verified empirically in v2.9.0 testing - bridges
+// never reached the play DMs because we'd set them to false). We now keep
+// Archivable=true so the clone works, and rely on cleanupBridges() to
+// remove the scripts from the edit DM when the test ends. The only failure
+// mode is the user saving DURING an active playtest, which would persist
+// the bridges to the .rbxl - that's a no-op next session because
+// installBridges() always calls cleanupBridges() first to clear stale
+// instances. The RemoteFunction/BindableFunction that the bridge scripts
+// CREATE at runtime stay Archivable=false (they're runtime-only and should
+// never appear in a save).
 
 import { ServerScriptService, StarterPlayer } from "@rbxts/services";
 
@@ -169,7 +180,9 @@ export function installBridges(): { installed: boolean; error?: string } {
 	const [ok, err] = pcall(() => {
 		const serverScript = new Instance("Script");
 		serverScript.Name = SERVER_SCRIPT_NAME;
-		serverScript.Archivable = false;
+		// Archivable=true so ExecutePlayModeAsync's deep-clone includes the
+		// script. cleanupBridges() removes it from the edit DM when the
+		// playtest ends.
 		setSource(serverScript, SERVER_BRIDGE_SOURCE);
 		serverScript.Parent = ServerScriptService;
 
@@ -179,7 +192,6 @@ export function installBridges(): { installed: boolean; error?: string } {
 		}
 		const clientScript = new Instance("LocalScript");
 		clientScript.Name = CLIENT_SCRIPT_NAME;
-		clientScript.Archivable = false;
 		setSource(clientScript, CLIENT_BRIDGE_SOURCE);
 		clientScript.Parent = sps;
 	});
