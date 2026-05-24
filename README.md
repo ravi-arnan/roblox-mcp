@@ -29,36 +29,11 @@ If you only need to read scripts and inspect static instance trees, the official
 
 All four are implemented in TypeScript under [studio-plugin/src/](studio-plugin/src/). The compiled `MCPPlugin.rbxmx` is attached to GitHub releases.
 
-## New in v2.9.0: game-VM eval bridges
-
-`execute_luau target=server/client-N` runs in the plugin VM with a fresh `ModuleScript` each call — clean isolation, but means `require(SomeModule)` returns a fresh table, so runtime-mutated module state in the user's game scripts is invisible. The new `eval_server_runtime` / `eval_client_runtime` tools fix that by routing through bridge scripts (ported from [chrrxs/roblox-mcp-primitives](https://github.com/Chrrxs/roblox-mcp-primitives)) that the plugin auto-installs at `start_playtest` and removes at `stop_playtest`.
-
-| Tool | Runs in | Shares require cache with | Needs LoadStringEnabled? |
-|---|---|---|---|
-| `execute_luau target=server` | Server peer plugin VM | None (fresh per call) | No |
-| `eval_server_runtime` | Server peer **Script VM** | Running game's server scripts | No (v2.10.1+) |
-| `execute_luau target=client-N` | Client peer plugin VM | None (fresh per call) | No |
-| `eval_client_runtime` | Client peer **LocalScript VM** | Running game's LocalScripts | No |
-
-Use the new tools when you need to inspect runtime-mutated module state (e.g., a `Net` library's cached internal counters). Use the originals when you want a clean sandbox or no playtest is running.
-
-## New in v2.10.0: cross-peer runtime log capture + auto-reconnect
-
-`get_runtime_logs` reads an in-memory ring buffer the plugin maintains on every peer's `LogService.MessageOut`. Each peer (edit, server, every client) gets its own 64 KB buffer with drop-oldest semantics, so the recent tail is always available — fixing the official Roblox MCP's `get_console_output` 10 KB drop-newest cap (loses recent messages after a busy boot) and boshyxd's `get_playtest_output` cross-peer routing issues. Default `target=all` fans out to every peer, merges by timestamp, and dedups same-message entries captured within a 2 s window across different peers (LogService reflects prints across DMs in Studio Play). Incremental polling via `since` returns only new entries.
-
-Same release fixes a long-standing reconnect issue: when the MCP server process restarts (e.g., Claude Code reconnects mid-session), the plugin now auto re-registers with the new server within ~500 ms via a `knownInstance` poll-response signal. No more manual Disconnect+Connect button-clicking in the plugin dock widget.
-
-`client-N` allocation is also now stateless lowest-unused — the first connected client is always `client-1` regardless of how many playtest cycles or Claude restarts you've done since. Verification recipes can hardcode `target=client-1`.
-
 ## New in v2.11.0: `export_rbxm` / `import_rbxm` and `get_memory_breakdown`
 
 **`export_rbxm` / `import_rbxm`** wrap engine v668's `SerializationService:SerializeInstancesAsync` / `DeserializeInstancesAsync` (PluginSecurity). `export_rbxm` serializes DataModel paths to a `.rbxm` on disk; `import_rbxm` reads bytes (local path, URL, or inline base64), deserializes, and parents the result under a chosen instance. Parenting is all-or-nothing — partial imports roll back. `target=edit` wraps the import in `ChangeHistoryService:TryBeginRecording` so one Ctrl+Z reverses the bundle. Non-creatable instances and services are rejected by the engine itself; the plugin surfaces the engine's error verbatim. No `read_rbxm_metadata` tool — the `.rbxm` format has no stability contract outside `DeserializeInstancesAsync`.
 
 **`get_memory_breakdown`** iterates `Enum.DeveloperMemoryTag` and calls `Stats:GetMemoryUsageMbForTag` per item, returning a per-peer `{ total_mb, categories, timestamp }`. `target=all` (default) fans out to every connected peer except `edit-proxy`, including clients via an added `ClientBroker` route. The per-tag loop is the workaround for `Stats:GetMemoryUsageMbAllCategories` being gated by `Capabilities: InternalTest` and therefore not callable from plugin context — `GetMemoryUsageMbForTag` is `Security: None` and works. In Studio Play mode all three peers (edit/server/client-N) share one OS process and report identical totals; in `mode=run` or Team Test the numbers diverge.
-
-## New in v2.10.1: `eval_server_runtime` no longer needs `LoadStringEnabled`
-
-The server eval bridge now uses the same `ModuleScript + require` shape as the client bridge, removing the dependency on `ServerScriptService.LoadStringEnabled`. `eval_server_runtime` works in fresh places out of the box (LoadStringEnabled defaults to false). Require-cache sharing with the running server's Scripts is unchanged.
 
 ---
 
