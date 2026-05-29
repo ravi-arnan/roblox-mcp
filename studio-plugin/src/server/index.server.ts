@@ -4,6 +4,12 @@ import Communication from "../modules/Communication";
 import ClientBroker from "../modules/ClientBroker";
 import RuntimeLogBuffer from "../modules/RuntimeLogBuffer";
 import StopPlayMonitor from "../modules/StopPlayMonitor";
+import * as RenderMonitor from "../modules/RenderMonitor";
+
+// Track render-loop liveness so input/screenshot tools can report "window
+// minimized / not rendering" instead of silently no-op'ing. No-op in the
+// server DM (RenderStepped can't connect there).
+RenderMonitor.start();
 
 // Attach the per-peer LogService.MessageOut listener as early as possible so
 // boot-time prints from the user's place scripts are captured. Powers the

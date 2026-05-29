@@ -21,11 +21,16 @@
 // ServerScriptService.LoadStringEnabled, so eval_server_runtime works even
 // when LoadStringEnabled=false (the default in fresh places).
 //
-// Lifecycle: TestHandlers.startPlaytest inserts both scripts into the EDIT
-// DM right before ExecutePlayModeAsync. ExecutePlayModeAsync clones the
-// DataModel into the play DMs, so the scripts come along and run there.
-// TestHandlers cleans them up from the edit DM when ExecutePlayModeAsync
-// returns (test ended for any reason: stop_playtest, manual close, EndTest).
+// Lifecycle: the bridges live PERMANENTLY in the edit DM. Communication
+// installs them (ensureBridgesInstalled) when the plugin connects in edit,
+// and TestHandlers.startPlaytest force-refreshes them right before
+// ExecutePlayModeAsync. ExecutePlayModeAsync clones the DataModel into the
+// play DMs, so the scripts come along and run there. We keep them in the edit
+// DM after a playtest ends (rather than cleaning up) so that a playtest the
+// dev starts MANUALLY via the Studio Play button — not the MCP start_playtest
+// tool — also gets the bridges cloned in. This is intentionally a little
+// intrusive (two helper scripts visible in Explorer) in exchange for a
+// zero-roundtrip eval_*_runtime experience for devs working 1:1 with an agent.
 //
 // Archivable handling: ExecutePlayModeAsync's deep-clone SKIPS instances
 // with Archivable=false (verified empirically in v2.9.0 testing - bridges
@@ -61,9 +66,9 @@ export const BRIDGE_NAMES = {
 // Embedded Luau. The double `${...}` references our exported names so a
 // rename here propagates to both the script source and the tool wrappers.
 const SERVER_BRIDGE_SOURCE = `
--- Auto-installed by @chrrxs/robloxstudio-mcp at start_playtest, removed at
--- stop_playtest. Provides shared-require-cache eval on the server peer for
--- the eval_server_runtime MCP tool.
+-- Installed by @chrrxs/robloxstudio-mcp to power the eval_server_runtime MCP
+-- tool (shared-require-cache eval on the server during playtests). Inert
+-- outside Studio (no-ops in live games); safe to leave in place.
 
 local ServerScriptService = game:GetService("ServerScriptService")
 local RunService = game:GetService("RunService")
@@ -88,9 +93,9 @@ end
 `;
 
 const CLIENT_BRIDGE_SOURCE = `
--- Auto-installed by @chrrxs/robloxstudio-mcp at start_playtest, removed at
--- stop_playtest. Provides shared-require-cache eval on the client peer for
--- the eval_client_runtime MCP tool.
+-- Installed by @chrrxs/robloxstudio-mcp to power the eval_client_runtime MCP
+-- tool (shared-require-cache eval on the client during playtests). Inert
+-- outside Studio (no-ops in live games); safe to leave in place.
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
@@ -113,6 +118,28 @@ bf.OnInvoke = function(payload)
 	return pcall(require, payload)
 end
 `;
+
+// Stamp written onto each installed bridge Script so we can tell whether the
+// bridge currently in the DM was produced by THIS plugin build. It's a djb2
+// hash of the actual bridge source plus the plugin version, so ANY change to
+// the source (or a version bump) yields a new stamp — which makes
+// ensureBridgesInstalled() force a refresh on the next plugin load instead of
+// keeping a stale bridge that happens to still be present (e.g. one saved into
+// the .rbxl from an older build).
+const STAMP_ATTR = "__MCPBridgeStamp";
+
+function computeBridgeStamp(): string {
+	const combined = `${SERVER_BRIDGE_SOURCE}|${CLIENT_BRIDGE_SOURCE}`;
+	let h = 5381;
+	for (let i = 1; i <= combined.size(); i++) {
+		h = (h * 33 + string.byte(combined, i)[0]) % 2147483647;
+	}
+	// "__VERSION__" is replaced with the package version at package time
+	// (scripts/build-plugin.mjs injectVersion), so a release bump also restamps.
+	return `${tostring(h)}-__VERSION__`;
+}
+
+const BRIDGE_STAMP = computeBridgeStamp();
 
 function setSource(scriptInst: Script | LocalScript, source: string): void {
 	// ScriptEditorService is the cleaner API and integrates with Studio's
@@ -144,6 +171,26 @@ export function cleanupBridges(): void {
 	}
 }
 
+// Idempotent variant: install only if the bridge scripts aren't already
+// present in the edit DM. Used to keep the bridges always available (so a
+// playtest the dev starts manually — not via the MCP start_playtest tool —
+// still clones them into the play DMs). Cheap no-op when already installed,
+// which avoids re-dirtying the place on every plugin reconnect.
+export function ensureBridgesInstalled(): { installed: boolean; error?: string } {
+	const { server, client } = findBridges();
+	if (server && client) {
+		// Both present — but only skip the reinstall if they were produced by
+		// THIS build. A mismatched/absent stamp means a stale bridge (older
+		// plugin, or one persisted in the saved place), so force a refresh.
+		const sStamp = server.GetAttribute(STAMP_ATTR);
+		const cStamp = client.GetAttribute(STAMP_ATTR);
+		if (sStamp === BRIDGE_STAMP && cStamp === BRIDGE_STAMP) {
+			return { installed: true };
+		}
+	}
+	return installBridges();
+}
+
 export function installBridges(): { installed: boolean; error?: string } {
 	// Defensive: clear any stale bridges from a prior unclean exit before
 	// inserting fresh. The injected script also self-cleans its
@@ -158,6 +205,7 @@ export function installBridges(): { installed: boolean; error?: string } {
 		// script. cleanupBridges() removes it from the edit DM when the
 		// playtest ends.
 		setSource(serverScript, SERVER_BRIDGE_SOURCE);
+		serverScript.SetAttribute(STAMP_ATTR, BRIDGE_STAMP);
 		serverScript.Parent = ServerScriptService;
 
 		const sps = getStarterPlayerScripts();
@@ -167,6 +215,7 @@ export function installBridges(): { installed: boolean; error?: string } {
 		const clientScript = new Instance("LocalScript");
 		clientScript.Name = CLIENT_SCRIPT_NAME;
 		setSource(clientScript, CLIENT_BRIDGE_SOURCE);
+		clientScript.SetAttribute(STAMP_ATTR, BRIDGE_STAMP);
 		clientScript.Parent = sps;
 	});
 

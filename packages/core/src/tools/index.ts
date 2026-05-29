@@ -3,6 +3,7 @@ import { BridgeService, RoutingFailure } from '../bridge-service.js';
 import { runBuildExecutor } from './build-executor.js';
 import { OpenCloudClient } from '../opencloud-client.js';
 import { RobloxCookieClient } from '../roblox-cookie-client.js';
+import { rgbaToJpeg } from '../jpeg-encoder.js';
 import { rgbaToPng } from '../png-encoder.js';
 import * as fs from 'fs';
 import * as os from 'os';
@@ -19,13 +20,27 @@ type RawImageCaptureResponse = {
   cameraPreset?: string;
 };
 
-function encodePngFromRgbaResponse(response: RawImageCaptureResponse): Buffer {
+// Encodes the raw RGBA capture into the requested image format.
+// - 'png': lossless — sharpest text/UI, but a busy 3D scene can be large.
+// - 'jpeg': default; quality 92 with 4:4:4 chroma (no subsampling) keeps text
+//   crisp at ~1/3 the size. The image rides back inline as an MCP tool result,
+//   so JPEG is the safe default for staying under client result-size caps.
+function encodeImageFromRgbaResponse(
+  response: RawImageCaptureResponse,
+  format: 'jpeg' | 'png',
+  quality: number,
+): { buffer: Buffer; mimeType: string } {
   if (!response.data || response.width === undefined || response.height === undefined) {
     throw new Error('Render response missing data, width, or height');
   }
-
   const rgbaBuffer = Buffer.from(response.data, 'base64');
-  return rgbaToPng(rgbaBuffer, response.width, response.height);
+  if (format === 'png') {
+    return { buffer: rgbaToPng(rgbaBuffer, response.width, response.height), mimeType: 'image/png' };
+  }
+  return {
+    buffer: rgbaToJpeg(rgbaBuffer, response.width, response.height, quality),
+    mimeType: 'image/jpeg',
+  };
 }
 
 // Names must match studio-plugin/src/modules/EvalBridges.ts BRIDGE_NAMES.
@@ -365,6 +380,26 @@ export class RobloxStudioTools {
       });
     }
     return this.client.request(endpoint, data, r.targetInstanceId, r.targetRole);
+  }
+
+  // Resolves which connected place a tool should target and whether a playtest
+  // CLIENT peer is present on it. Used by capture/input to auto-route to the
+  // running client (where the live viewport + input pipeline are) without the
+  // caller having to pass target. Throws RoutingFailure with the standard
+  // instance list if the place is ambiguous (multiple connected, no instance_id).
+  private _resolveRuntime(instance_id?: string): { instanceId: string; clientRole?: string } {
+    const r = this.bridge.resolveTarget({ instance_id, target: undefined });
+    if (!r.ok) throw new RoutingFailure(r.error);
+    // resolveTarget(target=undefined) prefers the edit role and always returns
+    // a single target, so targetInstanceId is the resolved place.
+    const resolvedId = (r as { targetInstanceId: string }).targetInstanceId;
+    const roles = this.bridge
+      .getInstances()
+      .filter((i) => i.instanceId === resolvedId)
+      .map((i) => i.role);
+    // Prefer client-1 when several clients are connected (multi-client playtest).
+    const clientRoles = roles.filter((role) => role.startsWith('client')).sort();
+    return { instanceId: resolvedId, clientRole: clientRoles[0] };
   }
 
 
@@ -1005,7 +1040,7 @@ export class RobloxStudioTools {
     const wrapper = buildModuleScriptInvokeWrapper({
       service: 'ServerScriptService',
       bridgeName: SERVER_LOCAL_NAME,
-      missingError: 'ServerEvalBridge not installed. Bridges are auto-installed at start_playtest and removed at stop_playtest. Start a playtest before calling eval_server_runtime.',
+      missingError: 'ServerEvalBridge not found. The bridge runs inside the play DM, so a playtest must be running. The bridge installs automatically (including for manually-started playtests); if a playtest is running and you still see this, reconnect the plugin in the edit window so the bridge reinstalls, then start the playtest again.',
       userCode: code,
     });
     const response = await this._callSingle('/api/execute-luau', { code: wrapper }, 'server', instance_id);
@@ -1033,7 +1068,7 @@ export class RobloxStudioTools {
     const wrapper = buildModuleScriptInvokeWrapper({
       service: 'ReplicatedStorage',
       bridgeName: CLIENT_LOCAL_NAME,
-      missingError: 'ClientEvalBridge not installed. Bridges are auto-installed at start_playtest and removed at stop_playtest. Start a playtest before calling eval_client_runtime.',
+      missingError: 'ClientEvalBridge not found. The bridge runs inside the play DM, so a playtest must be running. The bridge installs automatically (including for manually-started playtests); if a playtest is running and you still see this, reconnect the plugin in the edit window so the bridge reinstalls, then start the playtest again.',
       userCode: code,
     });
     const response = await this._callSingle('/api/execute-luau', { code: wrapper }, clientTarget, instance_id);
@@ -2089,9 +2124,12 @@ export class RobloxStudioTools {
     if (!action) {
       throw new Error('action is required for simulate_mouse_input');
     }
+    // Default to the running playtest client (where the input pipeline lives)
+    // when the caller didn't pick a target; fall back to edit otherwise.
+    const { instanceId, clientRole } = this._resolveRuntime(instance_id);
     const response = await this._callSingle('/api/simulate-mouse-input', {
-      action, x, y, button, scrollDirection
-    }, target || 'edit', instance_id);
+      action, x, y, button
+    }, target || clientRole || 'edit', instanceId);
     return {
       content: [{
         type: 'text',
@@ -2100,13 +2138,14 @@ export class RobloxStudioTools {
     };
   }
 
-  async simulateKeyboardInput(keyCode: string, action?: string, duration?: number, target?: string, instance_id?: string) {
-    if (!keyCode) {
-      throw new Error('keyCode is required for simulate_keyboard_input');
+  async simulateKeyboardInput(keyCode?: string, action?: string, duration?: number, text?: string, target?: string, instance_id?: string) {
+    if (!keyCode && text === undefined) {
+      throw new Error('keyCode or text is required for simulate_keyboard_input');
     }
+    const { instanceId, clientRole } = this._resolveRuntime(instance_id);
     const response = await this._callSingle('/api/simulate-keyboard-input', {
-      keyCode, action, duration
-    }, target || 'edit', instance_id);
+      keyCode, action, duration, text
+    }, target || clientRole || 'edit', instanceId);
     return {
       content: [{
         type: 'text',
@@ -2386,8 +2425,28 @@ export class RobloxStudioTools {
     return { content: [{ type: 'text', text: JSON.stringify(response) }] };
   }
 
-  async captureScreenshot(instance_id?: string) {
-    const response = await this._callSingle('/api/capture-screenshot', {}, undefined, instance_id) as RawImageCaptureResponse;
+  async captureScreenshot(instance_id?: string, format?: string, quality?: number) {
+    const { instanceId, clientRole } = this._resolveRuntime(instance_id);
+
+    let response: RawImageCaptureResponse;
+    if (clientRole) {
+      // Play mode. The running game VM can trigger CaptureScreenshot but can't
+      // read the resulting temp texture back (privilege gate). So capture on
+      // the client to get the rbxtemp:// id, then read it back in the edit DM —
+      // the rbxtemp handle is process-scoped and the edit/plugin identity is
+      // allowed to promote it into a readable EditableImage.
+      const begin = await this._callSingle('/api/capture-begin', {}, clientRole, instanceId) as { contentId?: string; error?: string };
+      if (begin.error) {
+        return { content: [{ type: 'text', text: begin.error }] };
+      }
+      if (!begin.contentId) {
+        return { content: [{ type: 'text', text: 'Screenshot capture failed: no content id returned from client.' }] };
+      }
+      response = await this._callSingle('/api/capture-read', { contentId: begin.contentId }, 'edit', instanceId) as RawImageCaptureResponse;
+    } else {
+      // Edit mode: capture and read back in the same (edit) context.
+      response = await this._callSingle('/api/capture-screenshot', {}, 'edit', instanceId) as RawImageCaptureResponse;
+    }
 
     if (response.error) {
       return {
@@ -2398,14 +2457,66 @@ export class RobloxStudioTools {
       };
     }
 
-    const pngBuffer = encodePngFromRgbaResponse(response);
+    const w = response.width;
+    const h = response.height;
+    if (w === undefined || h === undefined) {
+      return { content: [{ type: 'text', text: 'Screenshot response missing dimensions.' }] };
+    }
+
+    const fmt: 'jpeg' | 'png' = format === 'png' ? 'png' : 'jpeg';
+    const q = quality === undefined ? 92 : Math.max(1, Math.min(100, Math.floor(quality)));
+
+    // Cap the inline image size. Measured empirically: an ~8MB image (11MB
+    // base64) returns fine, but ~16MB (22MB base64) CLOSES the MCP connection
+    // and drops every Studio registration — a catastrophic failure, not a
+    // graceful error. 6MB is in the proven-safe range with comfortable margin.
+    // For PNG we refuse (rather than silently dropping the lossless guarantee
+    // the caller asked for); for JPEG we step quality down so the call still
+    // succeeds.
+    const MAX_IMAGE_BYTES = 6_000_000;
+    let { buffer, mimeType } = encodeImageFromRgbaResponse(response, fmt, q);
+    let usedQ = q;
+    let note = '';
+
+    if (buffer.length > MAX_IMAGE_BYTES) {
+      if (fmt === 'png') {
+        const mb = (buffer.length / 1048576).toFixed(1);
+        return {
+          content: [{
+            type: 'text',
+            text:
+              `PNG screenshot is ${mb}MB, over the ~${(MAX_IMAGE_BYTES / 1048576).toFixed(0)}MB inline image limit. ` +
+              `Use the default jpeg format (optionally with a "quality" value) or make the Studio window smaller for a lossless capture.`,
+          }],
+        };
+      }
+      while (buffer.length > MAX_IMAGE_BYTES && usedQ > 25) {
+        usedQ = Math.max(25, usedQ - 20);
+        buffer = encodeImageFromRgbaResponse(response, 'jpeg', usedQ).buffer;
+      }
+      note = ` — auto-reduced to q${usedQ} to fit the inline size limit; enlarge the Studio window or capture a smaller region for finer detail`;
+    }
+
+    // Explicit coordinate contract: the image is returned at native viewport
+    // resolution and is never downscaled, so its pixel grid IS the coordinate
+    // space simulate_mouse_input expects. Stating the dimensions removes any
+    // ambiguity about what (x, y) mean.
 
     return {
-      content: [{
-        type: 'image',
-        data: pngBuffer.toString('base64'),
-        mimeType: 'image/png',
-      }]
+      content: [
+        {
+          type: 'text',
+          text:
+            `Screenshot ${w}x${h}px (${fmt}${fmt === 'jpeg' ? ` q${usedQ}` : ''})${note}. ` +
+            `For simulate_mouse_input, x/y are pixel coordinates in this exact image with (0,0) at the ` +
+            `top-left; it is not downscaled, so use coordinates as you read them off the image.`,
+        },
+        {
+          type: 'image',
+          data: buffer.toString('base64'),
+          mimeType,
+        },
+      ],
     };
   }
 }

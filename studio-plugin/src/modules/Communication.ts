@@ -2,6 +2,7 @@ import { HttpService, RunService, ServerStorage } from "@rbxts/services";
 import State from "./State";
 import Utils from "./Utils";
 import UI from "./UI";
+import { ensureBridgesInstalled } from "./EvalBridges";
 import QueryHandlers from "./handlers/QueryHandlers";
 import PropertyHandlers from "./handlers/PropertyHandlers";
 import InstanceHandlers from "./handlers/InstanceHandlers";
@@ -143,6 +144,8 @@ const routeMap: Record<string, Handler> = {
 	"/api/preview-asset": AssetHandlers.previewAsset,
 
 	"/api/capture-screenshot": CaptureHandlers.captureScreenshot,
+	"/api/capture-begin": CaptureHandlers.captureBegin,
+	"/api/capture-read": CaptureHandlers.captureRead,
 	"/api/simulate-mouse-input": InputHandlers.simulateMouseInput,
 	"/api/simulate-keyboard-input": InputHandlers.simulateKeyboardInput,
 
@@ -457,6 +460,20 @@ function activatePlugin(connIndex?: number) {
 	// Initial /ready; pollForRequests will also re-fire ready if the server
 	// later reports knownInstance=false (process restart, etc).
 	sendReady(conn);
+
+	// Keep the eval bridges present in the edit DM so that ANY playtest —
+	// including one the dev starts manually via the Studio Play button —
+	// clones them into the play DMs and eval_*_runtime works with no setup
+	// roundtrip. Only the edit DM installs; play DMs already have the cloned
+	// copies. Idempotent, so reconnects don't re-dirty the place.
+	if (!RunService.IsRunning()) {
+		task.spawn(() => {
+			const result = ensureBridgesInstalled();
+			if (!result.installed) {
+				warn(`[MCPPlugin] Eval bridge install failed: ${result.error}`);
+			}
+		});
+	}
 
 	// Watch for game.Name updates so a stale "Place1" captured at first
 	// /ready gets refreshed once Studio settles on the real DM name.

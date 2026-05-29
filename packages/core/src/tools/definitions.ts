@@ -888,7 +888,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: 'eval_server_runtime',
     category: 'write',
-    description: 'Execute Luau on the server peer in the running game\'s Script VM (shares require cache with user game scripts). Use this instead of execute_luau target=server when you need to see runtime-mutated module state. Auto-installed at start_playtest, removed at stop_playtest.',
+    description: 'Execute Luau on the server peer in the running game\'s Script VM (shares require cache with user game scripts). Use this instead of execute_luau target=server when you need to see runtime-mutated module state. Requires a running playtest; the bridge is installed automatically (including for playtests started manually via the Studio Play button).',
     inputSchema: {
       type: 'object',
       properties: {
@@ -907,7 +907,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: 'eval_client_runtime',
     category: 'write',
-    description: 'Execute Luau on a client peer in the running game\'s LocalScript VM (shares require cache with user game scripts). Use this instead of execute_luau target=client-N when you need to see runtime-mutated module state. Auto-installed at start_playtest, removed at stop_playtest.',
+    description: 'Execute Luau on a client peer in the running game\'s LocalScript VM (shares require cache with user game scripts). Use this instead of execute_luau target=client-N when you need to see runtime-mutated module state. Requires a running playtest; the bridge is installed automatically (including for playtests started manually via the Studio Play button).',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1587,10 +1587,19 @@ part(0,2,0,2,1,1,"b")`,
   {
     name: 'capture_screenshot',
     category: 'read',
-    description: 'Capture a screenshot of the Roblox Studio viewport and return it as a PNG image. Requires EditableImage API to be enabled: Game Settings > Security > "Allow Mesh / Image APIs". Only works in Edit mode with the viewport visible.',
+    description: 'Capture the Roblox Studio viewport at native resolution and return it as an image, plus a text line stating the exact pixel dimensions. Works in Edit mode and during a playtest (auto-detects a running client and captures the live play viewport). The returned image is never downscaled, so its pixel grid is exactly the coordinate space simulate_mouse_input uses — read click positions straight off this image. For reading fine text/UI, use format="png" (lossless) or a higher quality; enlarging the Studio window raises resolution. Requires EditableImage API enabled (Game Settings > Security > "Allow Mesh / Image APIs") and the window to be visible.',
     inputSchema: {
       type: 'object',
       properties: {
+        format: {
+          type: 'string',
+          enum: ['jpeg', 'png'],
+          description: 'Image format. "jpeg" (default) is compact and crisp at high quality. "png" is lossless — best for reading dense text/UI, but larger (a busy 3D scene may be big).'
+        },
+        quality: {
+          type: 'number',
+          description: 'JPEG quality 1-100 (default 92). Higher = sharper text, larger size. Ignored for png.'
+        },
         instance_id: {
           type: 'string',
           description: 'Which connected Studio place to target. Required when multiple places are connected; omit when one. Use get_connected_instances to list available IDs.'
@@ -1603,36 +1612,31 @@ part(0,2,0,2,1,1,"b")`,
   {
     name: 'simulate_mouse_input',
     category: 'write',
-    description: 'Simulate mouse input in the Roblox Studio viewport via VirtualInputManager. Use during playtest to click UI buttons, interact with objects, or navigate menus. Coordinates are viewport pixels (top-left is 0,0). Use capture_screenshot to identify UI element positions before clicking.',
+    description: 'Simulate a mouse click in the running game via UserInputService:CreateVirtualInput. Use during a playtest to click UI buttons, interact with objects, or aim. Fires real UserInputService input and activates GUI buttons. Coordinates are viewport pixels matching capture_screenshot (top-left is 0,0) — take a screenshot first to find positions. Auto-targets the running client; only works during a playtest. Note: only click/mouseDown/mouseUp are supported (the API has no mouse-move or scroll).',
     inputSchema: {
       type: 'object',
       properties: {
         action: {
           type: 'string',
-          enum: ['click', 'mouseDown', 'mouseUp', 'move', 'scroll'],
-          description: 'Mouse action to perform. "click" does mouseDown + short delay + mouseUp.'
+          enum: ['click', 'mouseDown', 'mouseUp'],
+          description: 'Mouse action. "click" does mouseDown + short delay + mouseUp.'
         },
         x: {
           type: 'number',
-          description: 'Viewport pixel X coordinate'
+          description: 'Viewport pixel X coordinate (as seen in capture_screenshot)'
         },
         y: {
           type: 'number',
-          description: 'Viewport pixel Y coordinate'
+          description: 'Viewport pixel Y coordinate (as seen in capture_screenshot)'
         },
         button: {
           type: 'string',
           enum: ['Left', 'Right', 'Middle'],
           description: 'Mouse button (default: Left)'
         },
-        scrollDirection: {
-          type: 'string',
-          enum: ['up', 'down'],
-          description: 'Scroll direction (only for "scroll" action)'
-        },
         target: {
           type: 'string',
-          description: 'Instance target: "edit" (default), "server", "client-1", "client-2", etc.'
+          description: 'Instance target. Defaults to the running playtest client (client-1) when present, else "edit". Override with "server", "client-2", etc.'
         },
         instance_id: {
           type: 'string',
@@ -1645,13 +1649,13 @@ part(0,2,0,2,1,1,"b")`,
   {
     name: 'simulate_keyboard_input',
     category: 'write',
-    description: 'Simulate keyboard input via VirtualInputManager. Use during playtest for character movement (W/A/S/D), jumping (Space), interactions (E), or any key-driven action. For sustained movement, use "press" to hold and "release" to let go.',
+    description: 'Simulate keyboard input in the running game via UserInputService:CreateVirtualInput. Use during a playtest for character movement (W/A/S/D walks at full WalkSpeed with player controls intact), jumping (Space), interactions (E), or any key-driven action. Drives the real input pipeline so game scripts and control modules respond. For sustained movement use action="press" to hold and "release" to let go. Pass "text" instead of keyCode to type a string into the focused TextBox. Auto-targets the running client; only works during a playtest.',
     inputSchema: {
       type: 'object',
       properties: {
         keyCode: {
           type: 'string',
-          description: 'Enum.KeyCode name: "W", "A", "S", "D", "Space", "E", "F", "LeftShift", "LeftControl", "Return", "Tab", "Escape", "One", "Two", etc.'
+          description: 'Enum.KeyCode name: "W", "A", "S", "D", "Space", "E", "F", "LeftShift", "LeftControl", "Return", "Tab", "Escape", "One", "Two", etc. Omit if using "text".'
         },
         action: {
           type: 'string',
@@ -1662,16 +1666,19 @@ part(0,2,0,2,1,1,"b")`,
           type: 'number',
           description: 'Hold duration in seconds for "tap" action (default: 0.1). Use longer values for sustained input like walking.'
         },
+        text: {
+          type: 'string',
+          description: 'Type this string into the currently focused TextBox (uses SendTextInput). When provided, keyCode/action are ignored.'
+        },
         target: {
           type: 'string',
-          description: 'Instance target: "edit" (default), "server", "client-1", "client-2", etc.'
+          description: 'Instance target. Defaults to the running playtest client (client-1) when present, else "edit". Override with "server", "client-2", etc.'
         },
         instance_id: {
           type: 'string',
           description: 'Which connected Studio place to target. Required when multiple places are connected; omit when one. Use get_connected_instances to list available IDs.'
         }
-      },
-      required: ['keyCode']
+      }
     }
   },
 

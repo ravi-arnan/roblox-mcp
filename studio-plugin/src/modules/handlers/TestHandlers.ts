@@ -1,5 +1,5 @@
 import { HttpService, LogService, RunService } from "@rbxts/services";
-import { installBridges, cleanupBridges } from "../EvalBridges";
+import { installBridges, ensureBridgesInstalled } from "../EvalBridges";
 import StopPlayMonitor from "../StopPlayMonitor";
 
 const StudioTestService = game.GetService("StudioTestService");
@@ -135,7 +135,9 @@ function startPlaytest(requestData: Record<string, unknown>) {
 			logConnection = undefined;
 		}
 		cleanupStopListener();
-		cleanupBridges();
+		// Note: eval bridges are intentionally NOT cleaned up — they live
+		// permanently in the edit DM so manual playtests also get them. See
+		// EvalBridges.ts lifecycle comment.
 	}
 
 	if (testRunning) {
@@ -169,9 +171,10 @@ function startPlaytest(requestData: Record<string, unknown>) {
 		warn(`[MCP] Failed to inject stop listener: ${injErr}`);
 	}
 
-	// Auto-install the game-VM eval bridges (ServerEvalBridge + ClientEvalBridge)
-	// so eval_server_runtime / eval_client_runtime work without manual setup.
-	// Bridges are cleaned up from the edit DM after the play DMs tear down.
+	// Force-refresh the game-VM eval bridges (ServerEvalBridge + ClientEvalBridge)
+	// right before cloning so the play DMs get the current source. They also
+	// live permanently in the edit DM (installed on connect) so manually-started
+	// playtests get them too; here we just ensure they're fresh.
 	const bridgeInstall = installBridges();
 	if (!bridgeInstall.installed) {
 		warn(`[MCP] Eval bridge install failed: ${bridgeInstall.error}`);
@@ -203,7 +206,9 @@ function startPlaytest(requestData: Record<string, unknown>) {
 		testRunning = false;
 
 		cleanupStopListener();
-		cleanupBridges();
+		// Eval bridges persist in the edit DM (see EvalBridges.ts) — do not
+		// clean up here, so the next manual playtest still gets them.
+		ensureBridgesInstalled();
 	});
 
 	const msg = numPlayers !== undefined

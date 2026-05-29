@@ -1,6 +1,8 @@
 import { HttpService, Players, ReplicatedStorage, RunService, ServerStorage } from "@rbxts/services";
 import RuntimeLogBuffer from "./RuntimeLogBuffer";
 import MemoryHandlers from "./handlers/MemoryHandlers";
+import CaptureHandlers from "./handlers/CaptureHandlers";
+import InputHandlers from "./handlers/InputHandlers";
 import LuauExec from "./LuauExec";
 
 // Mirror of Communication.computeInstanceId() — duplicated here because the
@@ -76,6 +78,13 @@ const CLIENT_BROKER_ALLOWED_ENDPOINTS = new Set<string>([
 	"/api/execute-luau",
 	"/api/get-runtime-logs",
 	"/api/get-memory-breakdown",
+	// Screenshot capture must run in the client peer (CaptureService captures
+	// the play viewport there); the edit DM reads the temp id back separately.
+	"/api/capture-begin",
+	// Virtual input (CreateVirtualInput) drives the running client's input
+	// pipeline, so it must execute in the client peer's VM.
+	"/api/simulate-mouse-input",
+	"/api/simulate-keyboard-input",
 ]);
 
 interface ReadyResponseBody {
@@ -174,6 +183,15 @@ function setupClientBroker() {
 		if (payload && payload.endpoint === "/api/get-memory-breakdown") {
 			return MemoryHandlers.getMemoryBreakdown(payload.data ?? {});
 		}
+		if (payload && payload.endpoint === "/api/capture-begin") {
+			return CaptureHandlers.captureBegin();
+		}
+		if (payload && payload.endpoint === "/api/simulate-mouse-input") {
+			return InputHandlers.simulateMouseInput(payload.data ?? {});
+		}
+		if (payload && payload.endpoint === "/api/simulate-keyboard-input") {
+			return InputHandlers.simulateKeyboardInput(payload.data ?? {});
+		}
 		if (payload && payload.endpoint === "/api/execute-luau") {
 			return handleExecuteLuau(payload.data);
 		}
@@ -215,10 +233,12 @@ function pollProxy(proxyId: string, player: Player, rf: RemoteFunction) {
 							response = { success: false, error: `InvokeClient failed: ${tostring(invokeRes)}` };
 						}
 					} else {
+						const allowed: string[] = [];
+						for (const ep of CLIENT_BROKER_ALLOWED_ENDPOINTS) allowed.push(ep);
 						response = {
 							error:
 								`Client-proxy does not forward ${tostring(request.endpoint)}. ` +
-								`Allowed: /api/execute-luau, /api/get-runtime-logs.`,
+								`Allowed: ${allowed.join(", ")}.`,
 						};
 					}
 					postJson("/response", { requestId: body.requestId, response });

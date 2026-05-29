@@ -11,12 +11,13 @@ If you only need to read scripts and inspect static instance trees, the [officia
 Pick this if you want to:
 
 - **Start a playtest from your AI agent**, watch it run, and stop it cleanly — every time.
+- **See and control the running game** — capture the live play viewport as an image, then drive it with clicks, typing, and key presses (move the character, press buttons, interact). Screenshots work in Edit mode too.
 - **Evaluate Luau inside the running game**, on the server peer *or* a specific client, with access to the same `require` cache your game scripts use. Inspect runtime-mutated module state — networking caches, ECS tick state, datastore queues — that sandboxed eval can't see.
 - **Read live logs, memory, selection, and properties per peer** during a playtest. `target=edit | server | client-N` everywhere it makes sense.
 - **Round-trip parts of your place through `.rbxm`** (export/import via `SerializationService`) and undo the whole import with one Ctrl+Z.
 - **Get the real parser error** when your eval has a syntax bug — not a generic "Requested module experienced an error while loading".
 
-70 tools total — full file-tree, mass property reads/writes, script search-and-replace, attribute/tag management, build import/export, asset insertion, screenshot capture, ScriptEditorService integration, .rbxm bundling, runtime memory inspection.
+70 tools total — full file-tree, mass property reads/writes, script search-and-replace, attribute/tag management, build import/export, asset insertion, screenshot capture, virtual mouse/keyboard input, ScriptEditorService integration, .rbxm bundling, runtime memory inspection.
 
 A fork of [boshyxd/robloxstudio-mcp](https://github.com/boshyxd/robloxstudio-mcp) v2.7.0 with the playtest-driving and per-peer pieces actually working out of the box.
 
@@ -96,7 +97,7 @@ gemini mcp add robloxstudio-inspector npx --trust -- -y @chrrxs/robloxstudio-mcp
 ---
 
 <!-- VERSION_LINE -->
-**v2.12.0** — based on boshyxd v2.7.0
+**v2.13.0** — based on boshyxd v2.7.0
 
 ## Building from source
 

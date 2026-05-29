@@ -1,3 +1,5 @@
+import * as RenderMonitor from "../RenderMonitor";
+
 const CaptureService = game.GetService("CaptureService");
 const AssetService = game.GetService("AssetService");
 
@@ -71,7 +73,17 @@ function readPixelsTiled(img: EditableImage, w: number, h: number): buffer {
 	return fullBuf;
 }
 
-function captureScreenshotData(): unknown {
+// Triggers CaptureService:CaptureScreenshot and waits for the temporary
+// content id. Works in any DM, including the play CLIENT (where reading the
+// pixels back is blocked, but capturing is not). The returned rbxtemp:// id is
+// a process-scoped handle: it can be dereferenced from a DIFFERENT, more
+// privileged DM (the edit DM) — see captureRead.
+function doCaptureScreenshot(): { contentId: string } | { error: string } {
+	// Fast-fail with a clear reason if the window isn't rendering — otherwise
+	// CaptureScreenshot's callback never fires and we'd block for the full 10s.
+	const notRendering = RenderMonitor.notRenderingReason();
+	if (notRendering !== undefined) return { error: notRendering };
+
 	let contentId: string | undefined;
 
 	CaptureService.CaptureScreenshot((id: string) => {
@@ -82,14 +94,23 @@ function captureScreenshotData(): unknown {
 	while (contentId === undefined) {
 		if (tick() - startTime > 10) {
 			return {
-				error: "Screenshot capture timed out. Ensure the Studio viewport is visible and you are in Edit mode (not Play mode). Known Roblox bug: capture may fail if viewport renders a solid color.",
+				error: "Screenshot capture timed out (CaptureScreenshot callback never fired). The Studio window is likely minimized or occluded — restore it so the viewport renders. (Known Roblox bug: capture can also fail if the viewport renders a solid color.)",
 			};
 		}
 		task.wait(0.1);
 	}
 
+	return { contentId };
+}
+
+// Promotes a CaptureScreenshot content id into an EditableImage and reads its
+// RGBA pixels. MUST run in the edit/plugin context: the running game VM lacks
+// the privilege to create an EditableImage from a temporary texture id (errors
+// "cannot currently create editable image from temporary texture id"), while
+// the edit DM can — even for an id captured in the play client DM.
+function readContentToBase64(contentId: string): unknown {
 	const [editableOk, editableResult] = pcall(() => {
-		return AssetService.CreateEditableImageAsync(Content.fromUri(contentId!));
+		return AssetService.CreateEditableImageAsync(Content.fromUri(contentId));
 	});
 
 	if (!editableOk) {
@@ -118,11 +139,32 @@ function captureScreenshotData(): unknown {
 	return { success: true, width: w, height: h, data: base64Data };
 }
 
+// Edit-mode single shot: capture and read back in the same (edit) context.
+function captureScreenshotData(): unknown {
+	const cap = doCaptureScreenshot();
+	if ("error" in cap) return cap;
+	return readContentToBase64(cap.contentId);
+}
+
 function captureScreenshot(): unknown {
 	return captureScreenshotData();
+}
+
+// Play-mode step 1 (run on the CLIENT): capture only, return the temp id.
+function captureBegin(): unknown {
+	return doCaptureScreenshot();
+}
+
+// Play-mode step 2 (run on EDIT): read pixels from a temp id captured elsewhere.
+function captureRead(requestData: Record<string, unknown>): unknown {
+	const contentId = requestData.contentId as string | undefined;
+	if (!contentId) return { error: "contentId is required" };
+	return readContentToBase64(contentId);
 }
 
 export = {
 	captureScreenshotData,
 	captureScreenshot,
+	captureBegin,
+	captureRead,
 };
