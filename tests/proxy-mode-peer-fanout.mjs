@@ -12,16 +12,20 @@
 // zero values), meaning the aggregator didn't even attempt to query any
 // capture buffer.
 //
-// PREREQUISITE: an existing primary on port 58741 with a Studio plugin
-// polling it (typically the developer's Claude Code MCP subprocess). This
-// test spawns its own subprocess which will end up in proxy mode.
+// The test starts a control subprocess first so a primary exists on 58741,
+// then starts a second subprocess which must proxy through that primary.
 
-import { McpClient, runTest, assert, assertContains, startPlaytestAndWait, safeStopPlaytest } from './lib/mcp-client.mjs';
+import { McpClient, runTest, assert, assertContains, startPlaytestAndWait, safeStopPlaytest, waitForEditPeer } from './lib/mcp-client.mjs';
 import { setTimeout as delay } from 'node:timers/promises';
 
 const MARKER = 'FANOUT_MARKER_d7e4f1';
 
 await runTest('proxy-mode subprocess fans out to peers via primary', async ({ track }) => {
+  const control = track(new McpClient('primary-control'));
+  await control.start();
+  await control.initialize();
+  await waitForEditPeer(control);
+
   const proxy = track(new McpClient('proxy'));
   await proxy.start();
   await proxy.initialize();

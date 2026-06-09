@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 // Exercises the explicit StudioTestService multiplayer lifecycle tools.
 
-import { McpClient, runTest, assert, assertContains } from './lib/mcp-client.mjs';
+import { McpClient, runTest, assert, assertContains, waitForEditPeer } from './lib/mcp-client.mjs';
 
 const MARKER = `MULTI_TEST_${Date.now()}`;
 
 async function pickInstanceId(client) {
   if (process.env.MCP_INSTANCE_ID) return process.env.MCP_INSTANCE_ID;
+  await waitForEditPeer(client);
   const connected = await client.callTool('get_connected_instances', {});
   const instances = connected.instances ?? [];
   const edit = instances.find((i) => i.role === 'edit');

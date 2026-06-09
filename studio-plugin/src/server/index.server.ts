@@ -2,6 +2,7 @@ import State from "../modules/State";
 import UI from "../modules/UI";
 import Communication from "../modules/Communication";
 import ClientBroker from "../modules/ClientBroker";
+import { cleanupLegacyEditBridges, ensureRuntimeBridgeInstalled } from "../modules/EvalBridges";
 import RuntimeLogBuffer from "../modules/RuntimeLogBuffer";
 import StopPlayMonitor from "../modules/StopPlayMonitor";
 import * as RenderMonitor from "../modules/RenderMonitor";
@@ -28,10 +29,24 @@ const elements = UI.getElements();
 const ICON_DISCONNECTED = "rbxassetid://__BUTTON_ICON_DISCONNECTED__";
 const ICON_CONNECTING = "rbxassetid://__BUTTON_ICON_CONNECTING__";
 const ICON_CONNECTED = "rbxassetid://__BUTTON_ICON_CONNECTED__";
+const TOOLBAR_REGISTRATION_DELAY_SECONDS = 1;
 
-const toolbar = plugin.CreateToolbar("__TOOLBAR_NAME__");
-const button = toolbar.CreateButton("__BUTTON_TITLE__", "__BUTTON_TOOLTIP__", ICON_DISCONNECTED);
-UI.setToolbarButton(button, { disconnected: ICON_DISCONNECTED, connecting: ICON_CONNECTING, connected: ICON_CONNECTED });
+let toolbarButtonRegistered = false;
+
+function registerToolbarButton() {
+	if (toolbarButtonRegistered) {
+		return;
+	}
+	toolbarButtonRegistered = true;
+
+	const toolbar = plugin.CreateToolbar("__TOOLBAR_NAME__");
+	const button = toolbar.CreateButton("__BUTTON_TITLE__", "__BUTTON_TOOLTIP__", ICON_DISCONNECTED);
+	UI.setToolbarButton(button, { disconnected: ICON_DISCONNECTED, connecting: ICON_CONNECTING, connected: ICON_CONNECTED });
+
+	button.Click.Connect(() => {
+		elements.screenGui.Enabled = !elements.screenGui.Enabled;
+	});
+}
 
 
 elements.connectButton.Activated.Connect(() => {
@@ -44,11 +59,6 @@ elements.connectButton.Activated.Connect(() => {
 });
 
 
-button.Click.Connect(() => {
-	elements.screenGui.Enabled = !elements.screenGui.Enabled;
-});
-
-
 plugin.Unloading.Connect(() => {
 	Communication.deactivateAll();
 });
@@ -56,6 +66,7 @@ plugin.Unloading.Connect(() => {
 
 UI.updateUIState();
 Communication.checkForUpdates();
+task.delay(TOOLBAR_REGISTRATION_DELAY_SECONDS, registerToolbarButton);
 
 // Auto-activate per peer. The boshyxd plugin only registers with MCP when the
 // user clicks Connect in its UI, but that UI is invisible in play DMs - so
@@ -63,6 +74,14 @@ Communication.checkForUpdates();
 // short delay so the UI/State have a chance to initialize first.
 task.delay(2, () => {
 	const role = ClientBroker.forkRole();
+	if (role === "edit") {
+		cleanupLegacyEditBridges();
+	} else {
+		const result = ensureRuntimeBridgeInstalled();
+		if (!result.installed) {
+			warn(`[MCPPlugin] Runtime eval bridge install failed: ${result.error}`);
+		}
+	}
 	if (role === "edit" || role === "server") {
 		pcall(() => {
 			const idx = State.getActiveTabIndex();

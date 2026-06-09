@@ -7,14 +7,12 @@ state it starts.
 
 ## Prerequisites
 
-1. **Roblox Studio open** with the project's plugin installed and connected
-   (toolbar icon green or yellow, not red).
-2. **A primary MCP subprocess listening on `localhost:58741`** with the
-   plugin polling it. The simplest way: keep Claude Code (or any MCP client
-   configured against this server) running — its subprocess will hold the
-   port. Tests spawn additional subprocesses that enter **proxy mode** and
-   forward through the primary, which is exactly the path several of these
-   tests need to exercise.
+1. **Roblox Studio open to a place** with the project's plugin installed and
+   connected (toolbar icon green or yellow, not red). Opening only Studio's
+   launcher is not enough because plugins do not load there.
+2. **Port `localhost:58741` available or already held by this MCP server.**
+   Tests start their own subprocesses when the port is free. If a primary
+   subprocess is already running, tests use proxy mode and forward through it.
 3. **The built dist** at `packages/robloxstudio-mcp/dist/index.js` —
    `npm run build` if it's stale. If you've also changed plugin code, fully
    restart Studio so it picks up the new `.rbxmx`.
@@ -80,6 +78,7 @@ node scripts/studio-lifecycle.mjs wait-connected --variant main --version <expec
 |---|---|
 | `eval-bridge-error-preservation.mjs` | `eval_server_runtime` / `eval_client_runtime` surface actual user errors instead of Roblox's generic `"Requested module experienced an error while loading"` wrapper for explicit errors, nil derefs, parser errors, and nested `require()` module-load failures |
 | `eval-context-routing.mjs` | `execute_luau target=server/client-N` runs in plugin context on the selected peer, while `eval_server_runtime` / `eval_client_runtime` run through the server Script and client LocalScript eval bridges |
+| `runtime-bridge-lifecycle.mjs` | Runtime eval bridges are created inside play DataModels, stay out of edit mode, work for managed and manually-started playtests, and direct multiplayer logs get peer attribution |
 | `execute-luau-error-preservation.mjs` | `execute_luau` surfaces user error messages, parser errors, and nested `require()` module-load failures without leaking plugin-internal paths or Roblox's generic module-load wrapper |
 | `proxy-mode-peer-fanout.mjs` | `get_runtime_logs target=all`, `get_connected_instances`, and `get_memory_breakdown target=all` return non-empty capture/peer data when invoked from a proxy-mode subprocess (the multi-session path) |
 | `execute-luau-output-capture.mjs` | `execute_luau target=server` captures user `print()` and `warn()` calls in the response `output` array, matching the `target=edit` baseline |

@@ -1,5 +1,4 @@
 import { HttpService, LogService, Players, RunService } from "@rbxts/services";
-import { installBridges, ensureBridgesInstalled } from "../EvalBridges";
 import StopPlayMonitor from "../StopPlayMonitor";
 
 interface StudioTestServiceMultiplayer extends StudioTestService {
@@ -200,9 +199,8 @@ function startPlaytest(requestData: Record<string, unknown>) {
 			logConnection = undefined;
 		}
 		cleanupStopListener();
-		// Note: eval bridges are intentionally NOT cleaned up — they live
-		// permanently in the edit DM so manual playtests also get them. See
-		// EvalBridges.ts lifecycle comment.
+		// Runtime eval bridges are created by the play server/client plugin
+		// peers and disappear with the play DataModels.
 	}
 
 	if (testRunning) {
@@ -236,15 +234,6 @@ function startPlaytest(requestData: Record<string, unknown>) {
 		warn(`[MCP] Failed to inject stop listener: ${injErr}`);
 	}
 
-	// Force-refresh the game-VM eval bridges (ServerEvalBridge + ClientEvalBridge)
-	// right before cloning so the play DMs get the current source. They also
-	// live permanently in the edit DM (installed on connect) so manually-started
-	// playtests get them too; here we just ensure they're fresh.
-	const bridgeInstall = installBridges();
-	if (!bridgeInstall.installed) {
-		warn(`[MCP] Eval bridge install failed: ${bridgeInstall.error}`);
-	}
-
 	task.spawn(() => {
 		const [ok, result] = pcall(() => {
 			if (mode === "play") {
@@ -266,22 +255,12 @@ function startPlaytest(requestData: Record<string, unknown>) {
 		testRunning = false;
 
 		cleanupStopListener();
-		// Eval bridges persist in the edit DM (see EvalBridges.ts) — do not
-		// clean up here, so the next manual playtest still gets them.
-		ensureBridgesInstalled();
 	});
 
 	const response: Record<string, unknown> = {
 		success: true,
 		message: `Playtest started in ${mode} mode.`,
 	};
-	// Only mention eval bridges when they failed — when they're fine, the
-	// detail is noise. eval_server_runtime / eval_client_runtime will surface
-	// their own clear errors if the caller tries to use them after a failed
-	// install.
-	if (!bridgeInstall.installed) {
-		response.evalBridgesError = bridgeInstall.error;
-	}
 
 	return response;
 }
@@ -370,11 +349,6 @@ function multiplayerTestStart(requestData: Record<string, unknown>) {
 	const testArgs = requestData.testArgs !== undefined ? requestData.testArgs : {};
 	const testId = HttpService.GenerateGUID(false);
 
-	const bridgeInstall = installBridges();
-	if (!bridgeInstall.installed) {
-		warn(`[MCP] Eval bridge install failed: ${bridgeInstall.error}`);
-	}
-
 	multiplayerState = {
 		phase: "starting",
 		testId,
@@ -400,8 +374,6 @@ function multiplayerTestStart(requestData: Record<string, unknown>) {
 			multiplayerState.result = undefined;
 			multiplayerState.error = tostring(result);
 		}
-
-		ensureBridgesInstalled();
 	});
 
 	const response: Record<string, unknown> = {
@@ -412,9 +384,6 @@ function multiplayerTestStart(requestData: Record<string, unknown>) {
 		numPlayers,
 		testArgs,
 	};
-	if (!bridgeInstall.installed) {
-		response.evalBridgesError = bridgeInstall.error;
-	}
 	return response;
 }
 

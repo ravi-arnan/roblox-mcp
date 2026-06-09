@@ -20,6 +20,43 @@ type RawImageCaptureResponse = {
   cameraPreset?: string;
 };
 
+type ToolContent =
+  | { type: 'text'; text: string }
+  | { type: 'image'; data: string; mimeType: string };
+
+type EncodedViewportCapture = {
+  success: true;
+  width: number;
+  height: number;
+  format: 'jpeg' | 'png';
+  quality?: number;
+  note: string;
+  data: string;
+  mimeType: string;
+  message: string;
+} | {
+  success: false;
+  error: string;
+};
+
+type DeviceSimulatorSettings = {
+  deviceId?: string;
+  orientation?: string;
+  resolution?: { width: number; height: number };
+  pixelDensity?: number;
+  scalingMode?: string;
+};
+
+type DeviceSimulatorMatrixEntry = DeviceSimulatorSettings & {
+  label?: string;
+};
+
+type SimulationInclude = 'network' | 'deviceSimulator' | 'both';
+
+const MAX_INLINE_IMAGE_BYTES = 6_000_000;
+const MAX_DEVICE_MATRIX_ENTRIES = 6;
+const MAX_NETWORK_PACKET_LOSS_PERCENT = 0.5;
+
 // Encodes the raw RGBA capture into the requested image format.
 // - 'png': lossless — sharpest text/UI, but a busy 3D scene can be large.
 // - 'jpeg': default; quality 92 with 4:4:4 chroma (no subsampling) keeps text
@@ -45,6 +82,418 @@ function encodeImageFromRgbaResponse(
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+const NETWORK_PROFILE_KEYS = [
+  'InboundNetworkMinDelayMs',
+  'OutboundNetworkMinDelayMs',
+  'InboundNetworkJitterMs',
+  'OutboundNetworkJitterMs',
+  'InboundNetworkLossPercent',
+  'OutboundNetworkLossPercent',
+] as const;
+
+type NetworkProfileKey = typeof NETWORK_PROFILE_KEYS[number];
+type NetworkProfileValues = Partial<Record<NetworkProfileKey, number>>;
+
+const NETWORK_PROFILES: Record<'great' | 'good' | 'poor', Record<NetworkProfileKey, number>> = {
+  great: {
+    InboundNetworkMinDelayMs: 15,
+    OutboundNetworkMinDelayMs: 15,
+    InboundNetworkJitterMs: 0,
+    OutboundNetworkJitterMs: 0,
+    InboundNetworkLossPercent: 0,
+    OutboundNetworkLossPercent: 0,
+  },
+  good: {
+    InboundNetworkMinDelayMs: 50,
+    OutboundNetworkMinDelayMs: 50,
+    InboundNetworkJitterMs: 10,
+    OutboundNetworkJitterMs: 10,
+    InboundNetworkLossPercent: 0,
+    OutboundNetworkLossPercent: 0,
+  },
+  poor: {
+    InboundNetworkMinDelayMs: 150,
+    OutboundNetworkMinDelayMs: 150,
+    InboundNetworkJitterMs: 100,
+    OutboundNetworkJitterMs: 100,
+    InboundNetworkLossPercent: 0.5,
+    OutboundNetworkLossPercent: 0.5,
+  },
+};
+
+const ZERO_NETWORK_PROFILE: Record<NetworkProfileKey, number> = {
+  InboundNetworkMinDelayMs: 0,
+  OutboundNetworkMinDelayMs: 0,
+  InboundNetworkJitterMs: 0,
+  OutboundNetworkJitterMs: 0,
+  InboundNetworkLossPercent: 0,
+  OutboundNetworkLossPercent: 0,
+};
+
+const SIMULATION_PERSISTENCE_NOTES = [
+  'Normal Play client changes can write back to edit state.',
+  'Multiplayer clients inherit baseline at startup but are isolated afterward.',
+  'StudioTestService client device simulator state may appear stale on fresh clients, so reset after client startup is required.',
+];
+
+function normalizeNetworkProfile(profile: string, overrides?: Record<string, unknown>): NetworkProfileValues {
+  if (!['great', 'good', 'poor', 'custom'].includes(profile)) {
+    throw new Error('profile must be "great", "good", "poor", or "custom"');
+  }
+
+  const values: NetworkProfileValues = profile === 'custom'
+    ? {}
+    : { ...NETWORK_PROFILES[profile as 'great' | 'good' | 'poor'] };
+
+  if (overrides !== undefined) {
+    if (typeof overrides !== 'object' || overrides === null || Array.isArray(overrides)) {
+      throw new Error('overrides must be an object when provided');
+    }
+    const allowed = new Set<string>(NETWORK_PROFILE_KEYS);
+    for (const [key, value] of Object.entries(overrides)) {
+      if (!allowed.has(key)) {
+        throw new Error(`Unsupported network override "${key}". Allowed: ${NETWORK_PROFILE_KEYS.join(', ')}`);
+      }
+      if (typeof value !== 'number' || !Number.isFinite(value)) {
+        throw new Error(`Network override "${key}" must be a finite number`);
+      }
+      if (value < 0) {
+        throw new Error(`Network override "${key}" must be greater than or equal to 0`);
+      }
+      if ((key === 'InboundNetworkLossPercent' || key === 'OutboundNetworkLossPercent') && value > MAX_NETWORK_PACKET_LOSS_PERCENT) {
+        throw new Error(`Network override "${key}" cannot exceed ${MAX_NETWORK_PACKET_LOSS_PERCENT}; Roblox engine limits packet loss simulation to 0.5%.`);
+      }
+      values[key as NetworkProfileKey] = value;
+    }
+  }
+
+  if (Object.keys(values).length === 0) {
+    throw new Error('custom profile requires at least one override');
+  }
+
+  return values;
+}
+
+function buildNetworkProfileLuau(profile: string, values: NetworkProfileValues): string {
+  const valuesJson = JSON.stringify(values);
+  const keysJson = JSON.stringify(NETWORK_PROFILE_KEYS);
+  return `
+local HttpService = game:GetService("HttpService")
+local ns = settings():GetService("NetworkSettings")
+local keys = HttpService:JSONDecode(${JSON.stringify(keysJson)})
+local desired = HttpService:JSONDecode(${JSON.stringify(valuesJson)})
+local before = {}
+for _, key in ipairs(keys) do
+\tbefore[key] = ns[key]
+end
+for key, value in pairs(desired) do
+\tns[key] = value
+end
+local after = {}
+for _, key in ipairs(keys) do
+\tafter[key] = ns[key]
+end
+return HttpService:JSONEncode({
+\tprofile = ${JSON.stringify(profile)},
+\tapplied = desired,
+\tbefore = before,
+\tafter = after,
+})
+`.trim();
+}
+
+function buildNetworkStateLuau(operation: 'get' | 'reset'): string {
+  const keysJson = JSON.stringify(NETWORK_PROFILE_KEYS);
+  const resetJson = JSON.stringify(ZERO_NETWORK_PROFILE);
+  return `
+local HttpService = game:GetService("HttpService")
+local ns = settings():GetService("NetworkSettings")
+local operation = ${JSON.stringify(operation)}
+local keys = HttpService:JSONDecode(${JSON.stringify(keysJson)})
+local resetValues = HttpService:JSONDecode(${JSON.stringify(resetJson)})
+
+local function readState()
+\tlocal state = {}
+\tfor _, key in ipairs(keys) do
+\t\tstate[key] = ns[key]
+\tend
+\treturn state
+end
+
+if operation == "get" then
+\treturn HttpService:JSONEncode({
+\t\tsuccess = true,
+\t\tstate = readState(),
+\t})
+end
+
+if operation == "reset" then
+\tlocal before = readState()
+\tfor key, value in pairs(resetValues) do
+\t\tns[key] = value
+\tend
+\treturn HttpService:JSONEncode({
+\t\tsuccess = true,
+\t\tapplied = resetValues,
+\t\tbefore = before,
+\t\tafter = readState(),
+\t})
+end
+
+error("Unsupported network simulation operation: " .. tostring(operation), 0)
+`.trim();
+}
+
+function normalizeDeviceSimulatorResolution(value: unknown): { width: number; height: number } | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error('resolution must be an object with positive integer width and height');
+  }
+  const resolution = value as { width?: unknown; height?: unknown };
+  const width = resolution.width;
+  const height = resolution.height;
+  if (!Number.isInteger(width) || !Number.isInteger(height) || (width as number) <= 0 || (height as number) <= 0) {
+    throw new Error('resolution.width and resolution.height must be positive integers');
+  }
+  return { width: width as number, height: height as number };
+}
+
+function normalizeDeviceSimulatorSettings(input: {
+  deviceId?: unknown;
+  orientation?: unknown;
+  resolution?: unknown;
+  pixelDensity?: unknown;
+  scalingMode?: unknown;
+}): DeviceSimulatorSettings {
+  const settings: DeviceSimulatorSettings = {};
+
+  if (input.deviceId !== undefined) {
+    if (typeof input.deviceId !== 'string' || input.deviceId.trim() === '') {
+      throw new Error('deviceId must be a non-empty string');
+    }
+    settings.deviceId = input.deviceId;
+  }
+
+  if (input.orientation !== undefined) {
+    if (typeof input.orientation !== 'string' || input.orientation.trim() === '') {
+      throw new Error('orientation must be a non-empty string');
+    }
+    settings.orientation = input.orientation;
+  }
+
+  const resolution = normalizeDeviceSimulatorResolution(input.resolution);
+  if (resolution !== undefined) settings.resolution = resolution;
+
+  if (input.pixelDensity !== undefined) {
+    if (typeof input.pixelDensity !== 'number' || !Number.isFinite(input.pixelDensity) || input.pixelDensity <= 0) {
+      throw new Error('pixelDensity must be a positive finite number');
+    }
+    settings.pixelDensity = input.pixelDensity;
+  }
+
+  if (input.scalingMode !== undefined) {
+    if (typeof input.scalingMode !== 'string' || input.scalingMode.trim() === '') {
+      throw new Error('scalingMode must be a non-empty string');
+    }
+    settings.scalingMode = input.scalingMode;
+  }
+
+  return settings;
+}
+
+function hasDeviceSimulatorSettings(settings: DeviceSimulatorSettings): boolean {
+  return settings.deviceId !== undefined ||
+    settings.orientation !== undefined ||
+    settings.resolution !== undefined ||
+    settings.pixelDensity !== undefined ||
+    settings.scalingMode !== undefined;
+}
+
+function buildDeviceSimulatorLuau(operation: 'get' | 'set', options: Record<string, unknown>): string {
+  const payload = JSON.stringify({ operation, ...options });
+  return `
+local HttpService = game:GetService("HttpService")
+local simulator = game:GetService("StudioDeviceSimulatorService")
+local opts = HttpService:JSONDecode(${JSON.stringify(payload)})
+
+local function plain(value)
+\tlocal valueType = typeof(value)
+\tif valueType == "Vector2" then
+\t\treturn { x = value.X, y = value.Y, width = value.X, height = value.Y }
+\tend
+\tif valueType == "EnumItem" then
+\t\treturn value.Name
+\tend
+\tif type(value) == "table" then
+\t\tlocal out = {}
+\t\tfor k, v in pairs(value) do
+\t\t\tout[tostring(k)] = plain(v)
+\t\tend
+\t\treturn out
+\tend
+\treturn value
+end
+
+local function getDeviceInfo(deviceId)
+\tlocal ok, info = pcall(function()
+\t\treturn simulator:GetDeviceInfoAsync(deviceId)
+\tend)
+\tif ok then
+\t\treturn plain(info), nil
+\tend
+\treturn nil, tostring(info)
+end
+
+local function normalizeDeviceList(rawList)
+\tlocal devices = {}
+\tlocal ids = {}
+\tfor _, entry in ipairs(rawList) do
+\t\tlocal item
+\t\tlocal id
+\t\tif type(entry) == "table" then
+\t\t\titem = plain(entry)
+\t\t\tid = item.DeviceId or item.deviceId or item.Id or item.id or item[1]
+\t\telse
+\t\t\tid = tostring(entry)
+\t\t\titem = { DeviceId = id }
+\t\tend
+\t\tif id ~= nil then
+\t\t\tid = tostring(id)
+\t\t\tlocal info = getDeviceInfo(id)
+\t\t\tif type(info) == "table" then
+\t\t\t\titem = info
+\t\t\t\tif item.DeviceId == nil then item.DeviceId = id end
+\t\t\tend
+\t\t\tif item.IsCustom ~= true then
+\t\t\t\tids[id] = true
+\t\t\t\ttable.insert(devices, item)
+\t\t\tend
+\t\tend
+\tend
+\treturn devices, ids
+end
+
+local function getDeviceList()
+\tlocal rawList = simulator:GetDeviceListAsync()
+\treturn normalizeDeviceList(rawList)
+end
+
+local function assertBuiltInDeviceExists(deviceId)
+\tlocal _, ids = getDeviceList()
+\tif ids[deviceId] then return end
+\tlocal available = {}
+\tfor id in pairs(ids) do table.insert(available, id) end
+\ttable.sort(available)
+\terror('deviceId "' .. tostring(deviceId) .. '" is not an available built-in device. Use get_device_simulator_state to list supported device IDs. Available: ' .. table.concat(available, ", "), 0)
+end
+
+local function enumByName(enumType, raw, label)
+\tlocal name = tostring(raw)
+\tname = string.match(name, "([^%.]+)$") or name
+\tlocal available = {}
+\tfor _, item in ipairs(enumType:GetEnumItems()) do
+\t\ttable.insert(available, item.Name)
+\t\tif item.Name == name then
+\t\t\treturn item, item.Name
+\t\tend
+\tend
+\terror(label .. ' "' .. tostring(raw) .. '" is not valid. Available: ' .. table.concat(available, ", "), 0)
+end
+
+local function tryActiveGetter(state, key, fn)
+\tlocal ok, value = pcall(fn)
+\tif ok then
+\t\tstate[key] = plain(value)
+\telse
+\t\tstate.unavailable = state.unavailable or {}
+\t\tstate.unavailable[key] = tostring(value)
+\tend
+end
+
+local function readState(includeDeviceList, requestedDeviceId)
+\tlocal activeDeviceId = tostring(simulator:GetDeviceAsync())
+\tlocal state = {
+\t\tactiveDeviceId = activeDeviceId,
+\t\tisSimulating = activeDeviceId ~= "default",
+\t}
+
+\tif includeDeviceList then
+\t\tlocal devices = getDeviceList()
+\t\tstate.devices = devices
+\tend
+
+\tif requestedDeviceId ~= nil then
+\t\tassertBuiltInDeviceExists(requestedDeviceId)
+\t\tstate.deviceInfo = plain(simulator:GetDeviceInfoAsync(requestedDeviceId))
+\tend
+
+\tif state.isSimulating then
+\t\ttryActiveGetter(state, "resolution", function() return simulator:GetResolutionAsync() end)
+\t\ttryActiveGetter(state, "pixelDensity", function() return simulator:GetPixelDensityAsync() end)
+\t\ttryActiveGetter(state, "orientation", function() return simulator:GetOrientationAsync() end)
+\t\ttryActiveGetter(state, "scalingMode", function() return simulator:GetScalingModeAsync() end)
+\tend
+
+\treturn state
+end
+
+local function applySettings(settings)
+\tlocal applied = {}
+\tif settings.deviceId ~= nil then
+\t\tassertBuiltInDeviceExists(settings.deviceId)
+\t\tsimulator:SetDeviceAsync(settings.deviceId)
+\t\tapplied.deviceId = settings.deviceId
+\tend
+\tif settings.orientation ~= nil then
+\t\tlocal item, name = enumByName(Enum.ScreenOrientation, settings.orientation, "orientation")
+\t\tsimulator:SetOrientationAsync(item)
+\t\tapplied.orientation = name
+\tend
+\tif settings.resolution ~= nil then
+\t\tsimulator:SetResolutionAsync(settings.resolution.width, settings.resolution.height)
+\t\tapplied.resolution = { width = settings.resolution.width, height = settings.resolution.height }
+\tend
+\tif settings.pixelDensity ~= nil then
+\t\tsimulator:SetPixelDensityAsync(settings.pixelDensity)
+\t\tapplied.pixelDensity = settings.pixelDensity
+\tend
+\tif settings.scalingMode ~= nil then
+\t\tlocal item, name = enumByName(Enum.DeviceSimulatorScalingMode, settings.scalingMode, "scalingMode")
+\t\tsimulator:SetScalingModeAsync(item)
+\t\tapplied.scalingMode = name
+\tend
+\treturn applied
+end
+
+if opts.operation == "get" then
+\treturn readState(opts.includeDeviceList ~= false, opts.deviceId)
+end
+
+if opts.operation == "set" then
+\tlocal before = readState(false, nil)
+\tlocal applied
+\tif opts.stopSimulation == true then
+\t\tsimulator:StopSimulationAsync()
+\t\tapplied = { stopSimulation = true }
+\telse
+\t\tapplied = applySettings(opts.settings or {})
+\tend
+\treturn {
+\t\tsuccess = true,
+\t\tapplied = applied,
+\t\tbefore = before,
+\t\tafter = readState(false, nil),
+\t}
+end
+
+error("Unsupported device simulator operation: " .. tostring(opts.operation), 0)
+`.trim();
 }
 
 export class RobloxStudioTools {
@@ -171,6 +620,207 @@ export class RobloxStudioTools {
     return this._rolesForInstance(instanceId)
       .filter((role) => /^client-\d+$/.test(role))
       .sort((a, b) => Number(a.slice('client-'.length)) - Number(b.slice('client-'.length)));
+  }
+
+  private _resolveDeviceSimulatorSingleTarget(
+    target: string | undefined,
+    instance_id: string | undefined,
+    toolName: string,
+  ): { instanceId: string; role: string; selectedTarget: string } {
+    const selectedTarget = target ?? 'edit';
+    if (selectedTarget === 'server' || selectedTarget === 'all' || selectedTarget === 'all-clients' || selectedTarget === 'edit-proxy') {
+      throw new Error(`${toolName} target must be "edit" or "client-N" (got: ${selectedTarget})`);
+    }
+    if (selectedTarget !== 'edit' && !/^client-\d+$/.test(selectedTarget)) {
+      throw new Error(`${toolName} target must be "edit" or "client-N" (got: ${selectedTarget})`);
+    }
+    const resolved = this._resolveSingleTarget(selectedTarget, instance_id);
+    return { ...resolved, selectedTarget };
+  }
+
+  private _resolveDeviceSimulatorSetTargets(
+    target: string | undefined,
+    instance_id: string | undefined,
+  ): { instanceId: string; selectedTarget: string; roles: string[] } {
+    const selectedTarget = target ?? 'edit';
+    if (selectedTarget === 'all-clients') {
+      const instanceId = this._resolveInstanceIdOnly(instance_id);
+      const roles = this._clientRolesForInstance(instanceId);
+      if (roles.length === 0) {
+        throw new RoutingFailure({
+          code: 'target_role_not_present_on_instance',
+          message: `instance "${instanceId}" has no connected playtest client roles. Start a playtest first.`,
+          data: {
+            instances: this.bridge.getPublicInstances(),
+            count: this.bridge.getInstances().length,
+          },
+        });
+      }
+      return { instanceId, selectedTarget, roles };
+    }
+
+    const resolved = this._resolveDeviceSimulatorSingleTarget(selectedTarget, instance_id, 'set_device_simulator');
+    return { instanceId: resolved.instanceId, selectedTarget, roles: [resolved.role] };
+  }
+
+  private _normalizeSimulationInclude(include: string | undefined): SimulationInclude {
+    const selectedInclude = include ?? 'both';
+    if (selectedInclude !== 'network' && selectedInclude !== 'deviceSimulator' && selectedInclude !== 'both') {
+      throw new Error(`get_simulation_state include must be "network", "deviceSimulator", or "both" (got: ${selectedInclude})`);
+    }
+    return selectedInclude;
+  }
+
+  private _resolveSimulationTargets(
+    target: string | undefined,
+    instance_id: string | undefined,
+    toolName: string,
+  ): { instanceId: string; selectedTarget: string; roles: string[]; warnings: string[] } {
+    const selectedTarget = target ?? 'edit-and-clients';
+    if (selectedTarget === 'server' || selectedTarget === 'all' || selectedTarget === 'edit-proxy') {
+      throw new Error(`${toolName} target must be "edit", "client-N", "all-clients", or "edit-and-clients" (got: ${selectedTarget})`);
+    }
+
+    const instanceId = this._resolveInstanceIdOnly(instance_id);
+    const connectedRoles = this._rolesForInstance(instanceId);
+    const clientRoles = this._clientRolesForInstance(instanceId);
+    const warnings: string[] = [];
+    let roles: string[];
+
+    if (selectedTarget === 'edit') {
+      if (!connectedRoles.includes('edit')) {
+        throw new RoutingFailure({
+          code: 'target_role_not_present_on_instance',
+          message: `instance "${instanceId}" has no role "edit". Available roles: ${connectedRoles.join(', ') || 'none'}.`,
+          data: {
+            instances: this.bridge.getPublicInstances(),
+            count: this.bridge.getInstances().length,
+          },
+        });
+      }
+      roles = ['edit'];
+    } else if (selectedTarget === 'all-clients') {
+      roles = clientRoles;
+      if (roles.length === 0) {
+        warnings.push(`No connected playtest client roles found for instance "${instanceId}".`);
+      }
+    } else if (selectedTarget === 'edit-and-clients') {
+      roles = [];
+      if (connectedRoles.includes('edit')) {
+        roles.push('edit');
+      } else {
+        warnings.push(`No edit role found for instance "${instanceId}".`);
+      }
+      roles.push(...clientRoles);
+    } else if (/^client-\d+$/.test(selectedTarget)) {
+      if (!clientRoles.includes(selectedTarget)) {
+        throw new RoutingFailure({
+          code: 'target_role_not_present_on_instance',
+          message: `instance "${instanceId}" has no role "${selectedTarget}". Available client roles: ${clientRoles.join(', ') || 'none'}.`,
+          data: {
+            instances: this.bridge.getPublicInstances(),
+            count: this.bridge.getInstances().length,
+          },
+        });
+      }
+      roles = [selectedTarget];
+    } else {
+      throw new Error(`${toolName} target must be "edit", "client-N", "all-clients", or "edit-and-clients" (got: ${selectedTarget})`);
+    }
+
+    return { instanceId, selectedTarget, roles, warnings };
+  }
+
+  private _parseExecuteLuauJsonResponse(response: unknown, toolName: string): unknown {
+    const r = response as { success?: boolean; error?: string; message?: string; returnValue?: unknown };
+    if (r?.success === false) {
+      throw new Error(r.error || r.message || `${toolName} Luau execution failed`);
+    }
+    if (typeof r?.returnValue !== 'string') {
+      return response;
+    }
+    if (r.returnValue === '') {
+      return {};
+    }
+    try {
+      return JSON.parse(r.returnValue);
+    } catch {
+      throw new Error(`${toolName} returned non-JSON data: ${r.returnValue}`);
+    }
+  }
+
+  private async _executeNetworkStateOperation(
+    instanceId: string,
+    role: string,
+    operation: 'get' | 'reset',
+  ): Promise<unknown> {
+    const code = buildNetworkStateLuau(operation);
+    const response = await this.client.request('/api/execute-luau', { code }, instanceId, role);
+    return this._parseExecuteLuauJsonResponse(response, `network simulation ${operation}`);
+  }
+
+  private async _executeDeviceSimulatorOperation(
+    instanceId: string,
+    role: string,
+    operation: 'get' | 'set',
+    options: Record<string, unknown>,
+  ): Promise<unknown> {
+    const code = buildDeviceSimulatorLuau(operation, options);
+    const response = await this.client.request('/api/execute-luau', { code }, instanceId, role);
+    return this._parseExecuteLuauJsonResponse(response, `device simulator ${operation}`);
+  }
+
+  private _settingsFromDeviceSimulatorState(state: unknown): DeviceSimulatorSettings | { stopSimulation: true } {
+    const s = state as {
+      isSimulating?: boolean;
+      activeDeviceId?: unknown;
+      orientation?: unknown;
+      resolution?: unknown;
+      pixelDensity?: unknown;
+      scalingMode?: unknown;
+    };
+    if (!s || s.isSimulating !== true || typeof s.activeDeviceId !== 'string' || s.activeDeviceId === 'default') {
+      return { stopSimulation: true };
+    }
+    return normalizeDeviceSimulatorSettings({
+      deviceId: s.activeDeviceId,
+      orientation: s.orientation,
+      resolution: s.resolution,
+      pixelDensity: s.pixelDensity,
+      scalingMode: s.scalingMode,
+    });
+  }
+
+  private _deviceSimulatorStateWithoutDeviceList(state: unknown): unknown {
+    if (typeof state !== 'object' || state === null || Array.isArray(state)) {
+      return state;
+    }
+    const { devices: _devices, ...rest } = state as Record<string, unknown>;
+    return rest;
+  }
+
+  private _assertCanRestoreDeviceSimulatorState(state: unknown): void {
+    const s = state as {
+      isSimulating?: boolean;
+      activeDeviceId?: unknown;
+      devices?: unknown;
+    };
+    if (!s || s.isSimulating !== true || typeof s.activeDeviceId !== 'string' || s.activeDeviceId === 'default') {
+      return;
+    }
+    const devices = Array.isArray(s.devices) ? s.devices : [];
+    const isBuiltIn = devices.some((entry) => {
+      if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) return false;
+      const device = entry as { DeviceId?: unknown; deviceId?: unknown; Id?: unknown; id?: unknown; IsCustom?: unknown };
+      const id = device.DeviceId ?? device.deviceId ?? device.Id ?? device.id;
+      return id === s.activeDeviceId && device.IsCustom !== true;
+    });
+    if (!isBuiltIn) {
+      throw new Error(
+        `capture_device_matrix cannot safely restore active custom device "${s.activeDeviceId}". ` +
+        'Switch the simulator to default or a built-in preset first, or pass restoreAfter=false only if you intentionally accept changing the simulator state.',
+      );
+    }
   }
 
   private async _waitForRuntimeRoles(
@@ -901,6 +1551,464 @@ export class RobloxStudioTools {
     };
   }
 
+  async setNetworkProfile(profile: string, target?: string, overrides?: Record<string, unknown>, instance_id?: string) {
+    const values = normalizeNetworkProfile(profile, overrides);
+    const instanceId = this._resolveInstanceIdOnly(instance_id);
+    const clientRoles = this._clientRolesForInstance(instanceId);
+    const selectedTarget = target ?? 'client-1';
+
+    let targetRoles: string[];
+    if (selectedTarget === 'all-clients') {
+      targetRoles = clientRoles;
+    } else if (/^client-\d+$/.test(selectedTarget)) {
+      if (!clientRoles.includes(selectedTarget)) {
+        throw new RoutingFailure({
+          code: 'target_role_not_present_on_instance',
+          message: `instance "${instanceId}" has no role "${selectedTarget}". Available client roles: ${clientRoles.join(', ') || 'none'}.`,
+          data: {
+            instances: this.bridge.getPublicInstances(),
+            count: this.bridge.getInstances().length,
+          },
+        });
+      }
+      targetRoles = [selectedTarget];
+    } else {
+      throw new Error(`set_network_profile target must be "client-N" or "all-clients" (got: ${selectedTarget})`);
+    }
+
+    if (targetRoles.length === 0) {
+      throw new RoutingFailure({
+        code: 'target_role_not_present_on_instance',
+        message: `instance "${instanceId}" has no connected playtest client roles. Start a playtest first.`,
+        data: {
+          instances: this.bridge.getPublicInstances(),
+          count: this.bridge.getInstances().length,
+        },
+      });
+    }
+
+    const code = buildNetworkProfileLuau(profile, values);
+    const responses = await Promise.allSettled(
+      targetRoles.map(async (role) => {
+        const response = await this.client.request('/api/execute-luau', { code }, instanceId, role);
+        const result = this._parseExecuteLuauJsonResponse(response, 'set_network_profile');
+        return { role, result };
+      }),
+    );
+
+    const body: Record<string, unknown> = {
+      profile,
+      target: selectedTarget,
+      applied: values,
+      targets: {},
+    };
+    const targetResults = body.targets as Record<string, unknown>;
+    const failures: string[] = [];
+    for (let i = 0; i < responses.length; i++) {
+      const role = targetRoles[i];
+      const response = responses[i];
+      if (response.status === 'fulfilled') {
+        targetResults[role] = response.value.result;
+      } else {
+        const message = errorMessage(response.reason);
+        targetResults[role] = { error: message };
+        failures.push(`${role}: ${message}`);
+      }
+    }
+
+    if (failures.length > 0) {
+      throw new Error(`set_network_profile failed for ${failures.join('; ')}. Partial result: ${JSON.stringify(body)}`);
+    }
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(body),
+        },
+      ],
+    };
+  }
+
+  async getSimulationState(include?: string, target?: string, instance_id?: string) {
+    const selectedInclude = this._normalizeSimulationInclude(include);
+    const includeNetwork = selectedInclude === 'network' || selectedInclude === 'both';
+    const includeDeviceSimulator = selectedInclude === 'deviceSimulator' || selectedInclude === 'both';
+    const resolved = this._resolveSimulationTargets(target, instance_id, 'get_simulation_state');
+
+    const roleEntries = await Promise.all(resolved.roles.map(async (role) => {
+      const state: Record<string, unknown> = {};
+      const errors: Record<string, string> = {};
+
+      if (includeNetwork) {
+        try {
+          state.network = await this._executeNetworkStateOperation(resolved.instanceId, role, 'get');
+        } catch (error) {
+          errors.network = errorMessage(error);
+        }
+      }
+
+      if (includeDeviceSimulator) {
+        try {
+          state.deviceSimulator = await this._executeDeviceSimulatorOperation(
+            resolved.instanceId,
+            role,
+            'get',
+            { includeDeviceList: false },
+          );
+        } catch (error) {
+          errors.deviceSimulator = errorMessage(error);
+        }
+      }
+
+      if (Object.keys(errors).length > 0) {
+        state.errors = errors;
+      }
+      return { role, state };
+    }));
+
+    const roles: Record<string, unknown> = {};
+    for (const entry of roleEntries) {
+      roles[entry.role] = entry.state;
+    }
+
+    return {
+      content: [{
+        type: 'text',
+        text: JSON.stringify({
+          include: selectedInclude,
+          target: resolved.selectedTarget,
+          roles,
+          warnings: resolved.warnings,
+          persistenceNotes: SIMULATION_PERSISTENCE_NOTES,
+        }),
+      }],
+    };
+  }
+
+  async resetSimulationState(target?: string, network?: boolean, deviceSimulator?: boolean, instance_id?: string) {
+    const resetNetwork = network !== false;
+    const resetDeviceSimulator = deviceSimulator !== false;
+    if (!resetNetwork && !resetDeviceSimulator) {
+      throw new Error('reset_simulation_state requires network=true and/or deviceSimulator=true; both default to true');
+    }
+
+    const resolved = this._resolveSimulationTargets(target, instance_id, 'reset_simulation_state');
+    const roleEntries = await Promise.all(resolved.roles.map(async (role) => {
+      const result: Record<string, unknown> = {};
+      const errors: Record<string, string> = {};
+
+      if (resetNetwork) {
+        try {
+          result.network = await this._executeNetworkStateOperation(resolved.instanceId, role, 'reset');
+        } catch (error) {
+          errors.network = errorMessage(error);
+        }
+      }
+
+      if (resetDeviceSimulator) {
+        try {
+          result.deviceSimulator = await this._executeDeviceSimulatorOperation(
+            resolved.instanceId,
+            role,
+            'set',
+            { stopSimulation: true },
+          );
+        } catch (error) {
+          errors.deviceSimulator = errorMessage(error);
+        }
+      }
+
+      if (Object.keys(errors).length > 0) {
+        result.errors = errors;
+      }
+      return { role, result };
+    }));
+
+    const roles: Record<string, unknown> = {};
+    const failures: string[] = [];
+    for (const entry of roleEntries) {
+      roles[entry.role] = entry.result;
+      const errors = (entry.result as { errors?: Record<string, string> }).errors;
+      if (errors) {
+        for (const [kind, message] of Object.entries(errors)) {
+          failures.push(`${entry.role}.${kind}: ${message}`);
+        }
+      }
+    }
+
+    const body = {
+      target: resolved.selectedTarget,
+      network: resetNetwork,
+      deviceSimulator: resetDeviceSimulator,
+      roles,
+      warnings: resolved.warnings,
+      persistenceNotes: SIMULATION_PERSISTENCE_NOTES,
+    };
+
+    if (failures.length > 0) {
+      throw new Error(`reset_simulation_state failed for ${failures.join('; ')}. Partial result: ${JSON.stringify(body)}`);
+    }
+
+    return {
+      content: [{
+        type: 'text',
+        text: JSON.stringify(body),
+      }],
+    };
+  }
+
+  async getDeviceSimulatorState(target?: string, deviceId?: string, includeDeviceList?: boolean, instance_id?: string) {
+    if (deviceId !== undefined && (typeof deviceId !== 'string' || deviceId.trim() === '')) {
+      throw new Error('deviceId must be a non-empty string when provided');
+    }
+    const resolved = this._resolveDeviceSimulatorSingleTarget(target, instance_id, 'get_device_simulator_state');
+    const state = await this._executeDeviceSimulatorOperation(
+      resolved.instanceId,
+      resolved.role,
+      'get',
+      {
+        includeDeviceList: includeDeviceList !== false,
+        deviceId,
+      },
+    );
+    return {
+      content: [{
+        type: 'text',
+        text: JSON.stringify({
+          target: resolved.selectedTarget,
+          role: resolved.role,
+          ...(state as Record<string, unknown>),
+        }),
+      }],
+    };
+  }
+
+  async setDeviceSimulator(
+    target?: string,
+    deviceId?: string,
+    orientation?: string,
+    resolution?: unknown,
+    pixelDensity?: number,
+    scalingMode?: string,
+    stopSimulation?: boolean,
+    instance_id?: string,
+  ) {
+    const settings = normalizeDeviceSimulatorSettings({ deviceId, orientation, resolution, pixelDensity, scalingMode });
+    if (stopSimulation === true && hasDeviceSimulatorSettings(settings)) {
+      throw new Error('stopSimulation=true cannot be combined with deviceId, orientation, resolution, pixelDensity, or scalingMode');
+    }
+    if (stopSimulation !== true && !hasDeviceSimulatorSettings(settings)) {
+      throw new Error('set_device_simulator requires stopSimulation=true or at least one simulator setting');
+    }
+
+    const resolved = this._resolveDeviceSimulatorSetTargets(target, instance_id);
+    const responses = await Promise.allSettled(
+      resolved.roles.map(async (role) => {
+        const result = await this._executeDeviceSimulatorOperation(
+          resolved.instanceId,
+          role,
+          'set',
+          stopSimulation === true ? { stopSimulation: true } : { settings },
+        );
+        return { role, result };
+      }),
+    );
+
+    const body: Record<string, unknown> = {
+      target: resolved.selectedTarget,
+      targets: {},
+    };
+    const targets = body.targets as Record<string, unknown>;
+    const failures: string[] = [];
+    for (let i = 0; i < responses.length; i++) {
+      const role = resolved.roles[i];
+      const response = responses[i];
+      if (response.status === 'fulfilled') {
+        targets[role] = response.value.result;
+      } else {
+        const message = errorMessage(response.reason);
+        targets[role] = { error: message };
+        failures.push(`${role}: ${message}`);
+      }
+    }
+
+    if (failures.length > 0) {
+      throw new Error(`set_device_simulator failed for ${failures.join('; ')}. Partial result: ${JSON.stringify(body)}`);
+    }
+
+    return {
+      content: [{
+        type: 'text',
+        text: JSON.stringify(body),
+      }],
+    };
+  }
+
+  async captureDeviceMatrix(
+    entries: unknown,
+    target?: string,
+    format?: string,
+    quality?: number,
+    settleSeconds?: number,
+    restoreAfter?: boolean,
+    instance_id?: string,
+  ) {
+    if (!Array.isArray(entries) || entries.length === 0) {
+      throw new Error('capture_device_matrix requires a non-empty entries array');
+    }
+    if (entries.length > MAX_DEVICE_MATRIX_ENTRIES) {
+      throw new Error(`capture_device_matrix supports at most ${MAX_DEVICE_MATRIX_ENTRIES} entries per call; split larger matrices into multiple calls`);
+    }
+
+    const matrixEntries: DeviceSimulatorMatrixEntry[] = entries.map((entry, index) => {
+      if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) {
+        throw new Error(`entries[${index}] must be an object`);
+      }
+      const raw = entry as Record<string, unknown>;
+      if (raw.label !== undefined && typeof raw.label !== 'string') {
+        throw new Error(`entries[${index}].label must be a string when provided`);
+      }
+      return {
+        ...normalizeDeviceSimulatorSettings({
+          deviceId: raw.deviceId,
+          orientation: raw.orientation,
+          resolution: raw.resolution,
+          pixelDensity: raw.pixelDensity,
+          scalingMode: raw.scalingMode,
+        }),
+        label: raw.label as string | undefined,
+      };
+    });
+
+    const resolved = this._resolveDeviceSimulatorSingleTarget(target, instance_id, 'capture_device_matrix');
+    if (resolved.role.startsWith('client-') && await this._isMultiplayerTestRunning(resolved.instanceId)) {
+      throw new Error('capture_device_matrix does not support StudioTestService multiplayer client targets because Roblox scopes temporary screenshot textures per client process');
+    }
+
+    const settleMs = settleSeconds === undefined ? 300 : Math.max(0, Math.floor(settleSeconds * 1000));
+    const shouldRestore = restoreAfter !== false;
+    const before = await this._executeDeviceSimulatorOperation(
+      resolved.instanceId,
+      resolved.role,
+      'get',
+      { includeDeviceList: shouldRestore },
+    );
+    if (shouldRestore) {
+      this._assertCanRestoreDeviceSimulatorState(before);
+    }
+
+    const summary: Record<string, unknown> = {
+      target: resolved.selectedTarget,
+      role: resolved.role,
+      restoreAfter: shouldRestore,
+      before: this._deviceSimulatorStateWithoutDeviceList(before),
+      entries: [],
+    };
+    const entrySummaries = summary.entries as Array<Record<string, unknown>>;
+    const content: ToolContent[] = [];
+    const failures: string[] = [];
+
+    try {
+      for (let i = 0; i < matrixEntries.length; i++) {
+        const entry = matrixEntries[i];
+        const label = entry.label ?? `entry-${i + 1}`;
+        const entrySummary: Record<string, unknown> = {
+          index: i,
+          label,
+          settings: entry,
+        };
+        entrySummaries.push(entrySummary);
+
+        try {
+          const { label: _label, ...settings } = entry;
+          const applied = await this._executeDeviceSimulatorOperation(
+            resolved.instanceId,
+            resolved.role,
+            'set',
+            { settings },
+          );
+          entrySummary.applied = applied;
+          if (settleMs > 0) await sleep(settleMs);
+
+          const capture = await this._captureViewportImage(resolved.instanceId, resolved.role, format, quality);
+          if (capture.success) {
+            entrySummary.screenshot = {
+              width: capture.width,
+              height: capture.height,
+              format: capture.format,
+              quality: capture.quality,
+              mimeType: capture.mimeType,
+            };
+            content.push({
+              type: 'text',
+              text: `capture_device_matrix ${i + 1}/${matrixEntries.length} ${label}: ${capture.message}`,
+            });
+            content.push({
+              type: 'image',
+              data: capture.data,
+              mimeType: capture.mimeType,
+            });
+          } else {
+            entrySummary.error = capture.error;
+            failures.push(`${label}: ${capture.error}`);
+            content.push({
+              type: 'text',
+              text: `capture_device_matrix ${i + 1}/${matrixEntries.length} ${label}: ${capture.error}`,
+            });
+          }
+        } catch (error) {
+          const message = errorMessage(error);
+          entrySummary.error = message;
+          failures.push(`${label}: ${message}`);
+          content.push({
+            type: 'text',
+            text: `capture_device_matrix ${i + 1}/${matrixEntries.length} ${label}: ${message}`,
+          });
+        }
+      }
+    } finally {
+      if (shouldRestore) {
+        try {
+          const restoreSettings = this._settingsFromDeviceSimulatorState(before);
+          if ('stopSimulation' in restoreSettings) {
+            summary.restore = await this._executeDeviceSimulatorOperation(
+              resolved.instanceId,
+              resolved.role,
+              'set',
+              { stopSimulation: true },
+            );
+          } else {
+            summary.restore = await this._executeDeviceSimulatorOperation(
+              resolved.instanceId,
+              resolved.role,
+              'set',
+              { settings: restoreSettings },
+            );
+          }
+        } catch (error) {
+          const message = errorMessage(error);
+          summary.restoreError = message;
+          failures.push(`restore: ${message}`);
+        }
+      }
+    }
+
+    if (failures.length > 0) {
+      throw new Error(`capture_device_matrix failed for ${failures.join('; ')}. Partial result: ${JSON.stringify(summary)}`);
+    }
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(summary),
+        },
+        ...content,
+      ],
+    };
+  }
+
   async getRuntimeLogs(target?: string, since?: number, tail?: number, filter?: string, instance_id?: string) {
     // Per-capture in-memory log buffer (see studio-plugin RuntimeLogBuffer.ts).
     // target="all" (default) fans out to every connected instance except
@@ -1189,14 +2297,22 @@ export class RobloxStudioTools {
   }
 
   private async _isMultiplayerTestRunning(instanceId: string): Promise<boolean> {
-    if (!this._rolesForInstance(instanceId).includes('edit')) return false;
-    try {
-      const editState = await this.client.request('/api/multiplayer-test-state', {}, instanceId, 'edit');
-      const phase = editState?.session?.phase;
-      return phase === 'starting' || phase === 'running';
-    } catch {
-      return false;
+    const roles = this._rolesForInstance(instanceId);
+    const hasServer = roles.includes('server');
+    const clientCount = roles.filter((role) => role.startsWith('client-')).length;
+    if (roles.includes('edit')) {
+      try {
+        const editState = await this.client.request('/api/multiplayer-test-state', {}, instanceId, 'edit');
+        const phase = editState?.session?.phase;
+        if (phase === 'starting' || phase === 'running') return true;
+      } catch {
+        // Fall through to the runtime-shape heuristic below. Direct/manual
+        // StudioTestService multiplayer sessions do not update the edit peer's
+        // MCP-managed session state, but they still expose distinct server and
+        // client plugin peers.
+      }
     }
+    return hasServer && clientCount >= 2;
   }
 
   private async _waitForMultiplayerStart(
@@ -2583,22 +3699,25 @@ export class RobloxStudioTools {
     return { content: [{ type: 'text', text: JSON.stringify(response) }] };
   }
 
-  async captureScreenshot(instance_id?: string, format?: string, quality?: number) {
-    const { instanceId, clientRole } = this._resolveRuntime(instance_id);
-
+  private async _captureViewportImage(
+    instanceId: string,
+    targetRole: string,
+    format?: string,
+    quality?: number,
+  ): Promise<EncodedViewportCapture> {
     let response: RawImageCaptureResponse;
-    if (clientRole) {
+    if (targetRole.startsWith('client-')) {
       // Play mode. The running game VM can trigger CaptureScreenshot but can't
       // read the resulting temp texture back (privilege gate). So capture on
       // the client to get the rbxtemp:// id, then read it back in the edit DM —
       // the rbxtemp handle is process-scoped and the edit/plugin identity is
       // allowed to promote it into a readable EditableImage.
-      const begin = await this._callSingle('/api/capture-begin', {}, clientRole, instanceId) as { contentId?: string; error?: string };
+      const begin = await this._callSingle('/api/capture-begin', {}, targetRole, instanceId) as { contentId?: string; error?: string };
       if (begin.error) {
-        return { content: [{ type: 'text', text: begin.error }] };
+        return { success: false, error: begin.error };
       }
       if (!begin.contentId) {
-        return { content: [{ type: 'text', text: 'Screenshot capture failed: no content id returned from client.' }] };
+        return { success: false, error: 'Screenshot capture failed: no content id returned from client.' };
       }
       response = await this._callSingle('/api/capture-read', { contentId: begin.contentId }, 'edit', instanceId) as RawImageCaptureResponse;
     } else {
@@ -2609,7 +3728,7 @@ export class RobloxStudioTools {
     if (response.error) {
       let text = response.error;
       if (
-        clientRole &&
+        targetRole.startsWith('client-') &&
         response.error.includes('Failed to load texture, unexpected format') &&
         await this._isMultiplayerTestRunning(instanceId)
       ) {
@@ -2619,18 +3738,13 @@ export class RobloxStudioTools {
           'works because the temporary rbxtemp:// handle is readable from the edit process; multiplayer client handles ' +
           `appear to be scoped to the client process. Raw error: ${response.error}`;
       }
-      return {
-        content: [{
-          type: 'text',
-          text,
-        }]
-      };
+      return { success: false, error: text };
     }
 
     const w = response.width;
     const h = response.height;
     if (w === undefined || h === undefined) {
-      return { content: [{ type: 'text', text: 'Screenshot response missing dimensions.' }] };
+      return { success: false, error: 'Screenshot response missing dimensions.' };
     }
 
     const fmt: 'jpeg' | 'png' = format === 'png' ? 'png' : 'jpeg';
@@ -2643,26 +3757,23 @@ export class RobloxStudioTools {
     // For PNG we refuse (rather than silently dropping the lossless guarantee
     // the caller asked for); for JPEG we step quality down so the call still
     // succeeds.
-    const MAX_IMAGE_BYTES = 6_000_000;
     const encoded = encodeImageFromRgbaResponse(response, fmt, q);
     let { buffer } = encoded;
     const { mimeType } = encoded;
     let usedQ = q;
     let note = '';
 
-    if (buffer.length > MAX_IMAGE_BYTES) {
+    if (buffer.length > MAX_INLINE_IMAGE_BYTES) {
       if (fmt === 'png') {
         const mb = (buffer.length / 1048576).toFixed(1);
         return {
-          content: [{
-            type: 'text',
-            text:
-              `PNG screenshot is ${mb}MB, over the ~${(MAX_IMAGE_BYTES / 1048576).toFixed(0)}MB inline image limit. ` +
-              `Use the default jpeg format (optionally with a "quality" value) or make the Studio window smaller for a lossless capture.`,
-          }],
+          success: false,
+          error:
+            `PNG screenshot is ${mb}MB, over the ~${(MAX_INLINE_IMAGE_BYTES / 1048576).toFixed(0)}MB inline image limit. ` +
+            `Use the default jpeg format (optionally with a "quality" value) or make the Studio window smaller for a lossless capture.`,
         };
       }
-      while (buffer.length > MAX_IMAGE_BYTES && usedQ > 25) {
+      while (buffer.length > MAX_INLINE_IMAGE_BYTES && usedQ > 25) {
         usedQ = Math.max(25, usedQ - 20);
         buffer = encodeImageFromRgbaResponse(response, 'jpeg', usedQ).buffer;
       }
@@ -2674,19 +3785,41 @@ export class RobloxStudioTools {
     // space simulate_mouse_input expects. Stating the dimensions removes any
     // ambiguity about what (x, y) mean.
 
+    const message =
+      `Screenshot ${w}x${h}px (${fmt}${fmt === 'jpeg' ? ` q${usedQ}` : ''})${note}. ` +
+      `For simulate_mouse_input, x/y are pixel coordinates in this exact image with (0,0) at the ` +
+      `top-left; it is not downscaled, so use coordinates as you read them off the image.`;
+
+    return {
+      success: true,
+      width: w,
+      height: h,
+      format: fmt,
+      quality: fmt === 'jpeg' ? usedQ : undefined,
+      note,
+      data: buffer.toString('base64'),
+      mimeType,
+      message,
+    };
+  }
+
+  async captureScreenshot(instance_id?: string, format?: string, quality?: number) {
+    const { instanceId, clientRole } = this._resolveRuntime(instance_id);
+    const capture = await this._captureViewportImage(instanceId, clientRole ?? 'edit', format, quality);
+    if (!capture.success) {
+      return { content: [{ type: 'text', text: capture.error }] };
+    }
+
     return {
       content: [
         {
           type: 'text',
-          text:
-            `Screenshot ${w}x${h}px (${fmt}${fmt === 'jpeg' ? ` q${usedQ}` : ''})${note}. ` +
-            `For simulate_mouse_input, x/y are pixel coordinates in this exact image with (0,0) at the ` +
-            `top-left; it is not downscaled, so use coordinates as you read them off the image.`,
+          text: capture.message,
         },
         {
           type: 'image',
-          data: buffer.toString('base64'),
-          mimeType,
+          data: capture.data,
+          mimeType: capture.mimeType,
         },
       ],
     };

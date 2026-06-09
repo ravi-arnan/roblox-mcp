@@ -133,6 +133,12 @@ describe('Tool schema compatibility', () => {
       execute_luau: 'executeLuau',
       eval_server_runtime: 'evalServerRuntime',
       eval_client_runtime: 'evalClientRuntime',
+      set_network_profile: 'setNetworkProfile',
+      get_simulation_state: 'getSimulationState',
+      reset_simulation_state: 'resetSimulationState',
+      get_device_simulator_state: 'getDeviceSimulatorState',
+      set_device_simulator: 'setDeviceSimulator',
+      capture_device_matrix: 'captureDeviceMatrix',
       start_playtest: 'startPlaytest',
       stop_playtest: 'stopPlaytest',
       get_playtest_output: 'getPlaytestOutput',
@@ -198,5 +204,66 @@ describe('Tool schema compatibility', () => {
       'animation_memory',
       'audio_memory',
     ]);
+  });
+
+  test('device simulator schemas expose target routing and matrix entries', () => {
+    const getTool = TOOL_DEFINITIONS.find((t) => t.name === 'get_device_simulator_state');
+    const setTool = TOOL_DEFINITIONS.find((t) => t.name === 'set_device_simulator');
+    const matrixTool = TOOL_DEFINITIONS.find((t) => t.name === 'capture_device_matrix');
+    expect(getTool).toBeTruthy();
+    expect(setTool).toBeTruthy();
+    expect(matrixTool).toBeTruthy();
+
+    const getProps = (getTool!.inputSchema as { properties?: Record<string, unknown> }).properties ?? {};
+    expect(Object.keys(getProps).sort()).toEqual(['deviceId', 'includeDeviceList', 'instance_id', 'target'].sort());
+
+    const setProps = (setTool!.inputSchema as { properties?: Record<string, unknown> }).properties ?? {};
+    expect(Object.keys(setProps).sort()).toEqual([
+      'deviceId',
+      'instance_id',
+      'orientation',
+      'pixelDensity',
+      'resolution',
+      'scalingMode',
+      'stopSimulation',
+      'target',
+    ].sort());
+
+    const matrixSchema = matrixTool!.inputSchema as {
+      properties?: Record<string, { items?: unknown; maxItems?: number }>;
+      required?: string[];
+    };
+    expect(matrixSchema.required).toEqual(['entries']);
+    expect(matrixSchema.properties?.entries.items).toBeTruthy();
+    expect(matrixSchema.properties?.entries.maxItems).toBe(6);
+  });
+
+  test('simulation state schemas expose inspect and reset controls', () => {
+    const getTool = TOOL_DEFINITIONS.find((t) => t.name === 'get_simulation_state');
+    const resetTool = TOOL_DEFINITIONS.find((t) => t.name === 'reset_simulation_state');
+    expect(getTool).toBeTruthy();
+    expect(resetTool).toBeTruthy();
+
+    const getProps = (getTool!.inputSchema as { properties?: Record<string, unknown> }).properties ?? {};
+    expect(Object.keys(getProps).sort()).toEqual(['include', 'instance_id', 'target'].sort());
+    expect((getProps.include as { enum?: string[] }).enum).toEqual(['network', 'deviceSimulator', 'both']);
+
+    const resetProps = (resetTool!.inputSchema as { properties?: Record<string, unknown> }).properties ?? {};
+    expect(Object.keys(resetProps).sort()).toEqual(['deviceSimulator', 'instance_id', 'network', 'target'].sort());
+  });
+
+  test('set_network_profile schema caps packet loss at Roblox engine limit', () => {
+    const tool = TOOL_DEFINITIONS.find((t) => t.name === 'set_network_profile');
+    expect(tool).toBeTruthy();
+    const props = (tool!.inputSchema as { properties?: Record<string, unknown> }).properties ?? {};
+    const overrides = props.overrides as { properties?: Record<string, { minimum?: number; maximum?: number }> };
+    expect(overrides.properties?.InboundNetworkMinDelayMs.minimum).toBe(0);
+    expect(overrides.properties?.OutboundNetworkMinDelayMs.minimum).toBe(0);
+    expect(overrides.properties?.InboundNetworkJitterMs.minimum).toBe(0);
+    expect(overrides.properties?.OutboundNetworkJitterMs.minimum).toBe(0);
+    expect(overrides.properties?.InboundNetworkLossPercent.minimum).toBe(0);
+    expect(overrides.properties?.InboundNetworkLossPercent.maximum).toBe(0.5);
+    expect(overrides.properties?.OutboundNetworkLossPercent.minimum).toBe(0);
+    expect(overrides.properties?.OutboundNetworkLossPercent.maximum).toBe(0.5);
   });
 });

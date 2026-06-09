@@ -28,6 +28,12 @@ const ROUTED_TOOLS = new Set([
   'execute_luau',
   'eval_server_runtime',
   'eval_client_runtime',
+  'get_simulation_state',
+  'reset_simulation_state',
+  'set_network_profile',
+  'get_device_simulator_state',
+  'set_device_simulator',
+  'capture_device_matrix',
   'get_runtime_logs',
   'get_memory_breakdown',
   'multiplayer_test_start',
@@ -154,6 +160,9 @@ export class McpClient {
     if (text == null) {
       throw new Error(`Tool ${name} returned no text content: ${JSON.stringify(res)}`);
     }
+    if (res?.isError) {
+      throw new Error(`Tool ${name} returned isError: ${text}`);
+    }
     try {
       return JSON.parse(text);
     } catch {
@@ -205,12 +214,24 @@ async function getInstanceList(client) {
   }
 }
 
+export async function waitForEditPeer(client, { timeoutMs = 60_000, pollMs = 500 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const list = await getInstanceList(client);
+    if (list.some((i) => i.role === 'edit')) return;
+    await delay(pollMs);
+  }
+  throw new Error('waitForEditPeer: edit peer did not register within timeout');
+}
+
 // Convenience for tests that need a live playtest. Waits for any stale
 // server peer from a prior test to drain, starts a fresh playtest, then
 // polls until a *new* server peer registers (the play-server DM has spun
-// up, bridges installed, listener buffer ready). Fixed delays were flaky
+// up and listener buffers are ready). Fixed delays were flaky
 // after a prior test's stop_playtest left Studio mid-teardown.
 export async function startPlaytestAndWait(client, { timeoutSec = 30, pollMs = 500 } = {}) {
+  await waitForEditPeer(client, { timeoutMs: timeoutSec * 1000, pollMs });
+
   // 1. Drain stale server peers (previous test's playtest may still be
   //    tearing down — its server peer can linger for several seconds after
   //    stop_playtest returns).

@@ -13,9 +13,11 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const TESTS = [
   'eval-bridge-error-preservation.mjs',
   'eval-context-routing.mjs',
+  'runtime-bridge-lifecycle.mjs',
   'execute-luau-error-preservation.mjs',
   'proxy-mode-peer-fanout.mjs',
   'execute-luau-output-capture.mjs',
+  'simulation-state-lifecycle.mjs',
   'multiplayer-test-lifecycle.mjs',
 ];
 

@@ -1,5 +1,5 @@
 import { LogService, ReplicatedStorage, RunService, ServerScriptService } from "@rbxts/services";
-import { BRIDGE_NAMES } from "../EvalBridges";
+import { BRIDGE_NAMES, ensureRuntimeBridgeInstalled } from "../EvalBridges";
 import LuauExec from "../LuauExec";
 
 const PAYLOAD_INSTANCE_NAME = "__MCPEvalPayload";
@@ -15,6 +15,21 @@ interface WrapperResult {
 	output?: unknown;
 }
 
+function findBridge(config: { service: Instance; bridgeName: string }): BindableFunction | undefined {
+	const bridge = config.service.FindFirstChild(config.bridgeName);
+	return bridge && bridge.IsA("BindableFunction") ? bridge : undefined;
+}
+
+function waitForBridge(config: { service: Instance; bridgeName: string }, timeoutSec = 2): BindableFunction | undefined {
+	const deadline = tick() + timeoutSec;
+	let bridge = findBridge(config);
+	while (!bridge && tick() < deadline) {
+		task.wait(0.05);
+		bridge = findBridge(config);
+	}
+	return bridge;
+}
+
 function getBridgeConfig() {
 	if (!RunService.IsRunning()) {
 		return {
@@ -25,13 +40,13 @@ function getBridgeConfig() {
 		return {
 			service: ServerScriptService,
 			bridgeName: BRIDGE_NAMES.serverLocal,
-			missingError: "ServerEvalBridge not found. The bridge runs inside the play DM, so a playtest must be running. The bridge installs automatically (including for manually-started playtests); if a playtest is running and you still see this, reconnect the plugin in the edit window so the bridge reinstalls, then start the playtest again.",
+			missingError: "ServerEvalBridge not found. The bridge runs inside the play DM, so a playtest must be running. The bridge installs automatically in the runtime server peer, including for manually-started playtests.",
 		};
 	}
 	return {
 		service: ReplicatedStorage,
 		bridgeName: BRIDGE_NAMES.clientLocal,
-		missingError: "ClientEvalBridge not found. The bridge runs inside the play DM, so a playtest must be running. The bridge installs automatically (including for manually-started playtests); if a playtest is running and you still see this, reconnect the plugin in the edit window so the bridge reinstalls, then start the playtest again.",
+		missingError: "ClientEvalBridge not found. The bridge runs inside the play DM, so a playtest must be running. The bridge installs automatically in the runtime client peer, including for manually-started playtests.",
 	};
 }
 
@@ -44,9 +59,22 @@ function evalRuntime(requestData: Record<string, unknown>) {
 		return { bridge: "missing", error: config.error };
 	}
 
-	const bridge = config.service.FindFirstChild(config.bridgeName);
-	if (!bridge || !bridge.IsA("BindableFunction")) {
-		return { bridge: "missing", error: config.missingError };
+	let bridge = findBridge(config);
+	if (!bridge) {
+		const install = ensureRuntimeBridgeInstalled();
+		if (!install.installed) {
+			return {
+				bridge: "missing",
+				error: `${config.missingError} Runtime bridge install failed: ${install.error}`,
+			};
+		}
+		bridge = waitForBridge(config);
+	}
+	if (!bridge) {
+		return {
+			bridge: "missing",
+			error: `${config.missingError} Runtime bridge was installed but did not become ready.`,
+		};
 	}
 
 	const m = new Instance("ModuleScript");
