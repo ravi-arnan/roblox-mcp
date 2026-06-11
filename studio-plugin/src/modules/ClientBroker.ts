@@ -7,6 +7,7 @@ import InputHandlers from "./handlers/InputHandlers";
 import EvalRuntimeHandlers from "./handlers/EvalRuntimeHandlers";
 import LuauExec from "./LuauExec";
 import State from "./State";
+import HttpDiagnostics from "./HttpDiagnostics";
 
 interface StudioTestServiceMultiplayer extends StudioTestService {
 	CanLeaveTest(): boolean;
@@ -64,7 +65,8 @@ function resolvePlaceName(): string {
 // is gone: stop now uses StopPlayMonitor with plugin:SetSetting cross-DM
 // signaling, which works regardless of MCP server state.)
 
-const MCP_URL = "http://localhost:58741";
+const DEFAULT_MCP_URL = "http://localhost:58741";
+let mcpUrl = DEFAULT_MCP_URL;
 const BROKER_NAME = "__MCPClientBroker";
 const BROKER_OWNER_ATTRIBUTE = "__MCPBrokerOwner";
 
@@ -152,12 +154,26 @@ function forkRole(): "edit" | "server" | "client" {
 function postJson(endpoint: string, body: Record<string, unknown>) {
 	return pcall(() =>
 		HttpService.RequestAsync({
-			Url: `${MCP_URL}${endpoint}`,
+			Url: `${mcpUrl}${endpoint}`,
 			Method: "POST",
 			Headers: { "Content-Type": "application/json" },
 			Body: HttpService.JSONEncode(body),
 		}),
 	);
+}
+
+function formatPostJsonFailure(endpoint: string, ok: boolean, res: unknown): string {
+	return HttpDiagnostics.formatRequestFailure(`${mcpUrl}${endpoint}`, ok, res);
+}
+
+function setServerUrl(serverUrl: string | undefined): void {
+	if (serverUrl !== undefined && serverUrl !== "") {
+		mcpUrl = serverUrl;
+	}
+}
+
+function getServerUrl(): string {
+	return mcpUrl;
 }
 
 function handleExecuteLuau(data: Record<string, unknown> | undefined) {
@@ -277,13 +293,14 @@ function setupClientBroker() {
 }
 
 const proxyByPlayer = new Map<Player, ProxyEntry>();
+const proxyRegisterFailuresByPlayer = new Set<Player>();
 let serverBrokerStarted = false;
 
 function pollProxy(proxyId: string, player: Player, rf: RemoteFunction) {
 	while (player.Parent !== undefined && proxyByPlayer.has(player)) {
 		const [ok, res] = pcall(() =>
 			HttpService.RequestAsync({
-				Url: `${MCP_URL}/poll?pluginSessionId=${proxyId}`,
+				Url: `${mcpUrl}/poll?pluginSessionId=${proxyId}`,
 				Method: "GET",
 				Headers: { "Content-Type": "application/json" },
 			}),
@@ -341,18 +358,23 @@ function registerProxy(player: Player, rf: RemoteFunction) {
 		pluginVariant: State.PLUGIN_VARIANT,
 	});
 	if (!ok || !res || !res.Success) {
-		warn(`[robloxstudio-mcp] proxy register failed for ${player.Name}`);
+		proxyRegisterFailuresByPlayer.add(player);
+		warn(`[robloxstudio-mcp] proxy register failed for ${player.Name}: ${formatPostJsonFailure("/ready", ok, res)}`);
 		return;
 	}
 	const body = HttpService.JSONDecode(res.Body) as ReadyResponseBody;
 	const assigned = body.assignedRole ?? "client";
 	proxyByPlayer.set(player, { pluginSessionId: proxyId, role: assigned });
+	if (proxyRegisterFailuresByPlayer.has(player)) {
+		proxyRegisterFailuresByPlayer.delete(player);
+		print(`[robloxstudio-mcp] proxy registered for ${player.Name} as ${assigned} via ${mcpUrl}`);
+	}
 	task.spawn(pollProxy, proxyId, player, rf);
 }
 
 // (Removed: startEditProxyLoop. The play-server DM no longer registers an
 // "edit-proxy" peer with the MCP server. stop_playtest now uses a cross-DM
-// plugin:SetSetting flag consumed by StopPlayMonitor in the play-server DM,
+// plugin:SetSetting request consumed by StopPlayMonitor in the play-server DM,
 // which doesn't depend on MCP server state or peer registration at all.)
 
 function setupServerBroker() {
@@ -377,6 +399,7 @@ function setupServerBroker() {
 		const entry = proxyByPlayer.get(p);
 		if (entry) {
 			proxyByPlayer.delete(p);
+			proxyRegisterFailuresByPlayer.delete(p);
 			postJson("/disconnect", { pluginSessionId: entry.pluginSessionId });
 		}
 	});
@@ -389,7 +412,10 @@ function setupServerBroker() {
 }
 
 export = {
-	MCP_URL,
+	MCP_URL: DEFAULT_MCP_URL,
+	DEFAULT_MCP_URL,
+	getServerUrl,
+	setServerUrl,
 	forkRole,
 	setupClientBroker,
 	setupServerBroker,

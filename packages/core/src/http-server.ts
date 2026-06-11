@@ -11,6 +11,7 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import { RobloxStudioTools } from './tools/index.js';
 import { BridgeService, RoutingFailure, toPublic } from './bridge-service.js';
+import type { RegisterInstanceResult } from './bridge-service.js';
 import type { ToolDefinition } from './tools/definitions.js';
 
 interface StreamableHttpConfig {
@@ -194,33 +195,63 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
       pluginVersion,
       pluginVariant,
     } = req.body;
+    const requestContext = {
+      instanceId: typeof instanceId === 'string' ? instanceId : undefined,
+      role: typeof role === 'string' ? role : undefined,
+      placeId: typeof placeId === 'number' ? placeId : undefined,
+      placeName: typeof placeName === 'string' ? placeName : undefined,
+      dataModelName: typeof dataModelName === 'string' ? dataModelName : undefined,
+      isRunning: typeof isRunning === 'boolean' ? isRunning : undefined,
+      pluginVersion: typeof pluginVersion === 'string' ? pluginVersion : undefined,
+      pluginVariant: typeof pluginVariant === 'string' ? pluginVariant : undefined,
+    };
 
     if (!pluginSessionId || !instanceId || !role) {
+      const missingFields = [
+        !pluginSessionId ? 'pluginSessionId' : undefined,
+        !instanceId ? 'instanceId' : undefined,
+        !role ? 'role' : undefined,
+      ].filter((field): field is string => !!field);
       res.status(400).json({
         success: false,
-        error: 'pluginSessionId, instanceId, and role are required',
+        error: 'missing_ready_fields',
+        message: `/ready missing required field(s): ${missingFields.join(', ')}`,
+        missingFields,
+        request: requestContext,
       });
       return;
     }
 
-    const result = bridge.registerInstance({
-      pluginSessionId,
-      instanceId,
-      role,
-      placeId: typeof placeId === 'number' ? placeId : 0,
-      placeName: typeof placeName === 'string' ? placeName : '',
-      dataModelName: typeof dataModelName === 'string' ? dataModelName : '',
-      isRunning: !!isRunning,
-      pluginVersion: typeof pluginVersion === 'string' ? pluginVersion : '',
-      pluginVariant: typeof pluginVariant === 'string' ? pluginVariant : 'unknown',
-      serverVersion: serverConfig?.version ?? '',
-    });
+    let result: RegisterInstanceResult;
+    try {
+      result = bridge.registerInstance({
+        pluginSessionId,
+        instanceId,
+        role,
+        placeId: typeof placeId === 'number' ? placeId : 0,
+        placeName: typeof placeName === 'string' ? placeName : '',
+        dataModelName: typeof dataModelName === 'string' ? dataModelName : '',
+        isRunning: !!isRunning,
+        pluginVersion: typeof pluginVersion === 'string' ? pluginVersion : '',
+        pluginVariant: typeof pluginVariant === 'string' ? pluginVariant : 'unknown',
+        serverVersion: serverConfig?.version ?? '',
+      });
+    } catch (err) {
+      res.status(500).json({
+        success: false,
+        error: 'ready_registration_exception',
+        message: err instanceof Error ? err.message : String(err),
+        request: requestContext,
+      });
+      return;
+    }
 
     if (!result.ok) {
       res.status(409).json({
         success: false,
         error: result.error.code,
         message: result.error.message,
+        request: requestContext,
         existing: result.error.existing,
       });
       return;

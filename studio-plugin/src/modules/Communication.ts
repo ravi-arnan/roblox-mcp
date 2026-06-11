@@ -18,6 +18,8 @@ import SerializationHandlers from "./handlers/SerializationHandlers";
 import MemoryHandlers from "./handlers/MemoryHandlers";
 import SceneAnalysisHandlers from "./handlers/SceneAnalysisHandlers";
 import EvalRuntimeHandlers from "./handlers/EvalRuntimeHandlers";
+import ServerUrlSettings from "./ServerUrlSettings";
+import HttpDiagnostics from "./HttpDiagnostics";
 import { Connection, RequestPayload, PollResponse, ReadyResponse } from "../types";
 
 // Per-plugin-load random GUID. Used as the /poll URL param so the server
@@ -50,6 +52,7 @@ let assignedRole: string | undefined;
 let duplicateInstanceRole = false;
 let hasVersionMismatch = false;
 let lastVersionMismatchWarningKey: string | undefined;
+const readyFailureLogKeys = new Set<string>();
 
 // Cache the published place name from MarketplaceService:GetProductInfo so
 // /ready can carry a friendly identifier (e.g. "Natural Disasters") distinct
@@ -249,30 +252,44 @@ function sendReady(conn: Connection): void {
 				}),
 			});
 		});
-		if (!readyOk) return;
-		// 409 = duplicate_instance_role. Surface in UI and stop polling.
-		if (readyResult.StatusCode === 409) {
-			duplicateInstanceRole = true;
-			conn.isActive = false;
-			const ui = UI.getElements();
-			if (State.getActiveTabIndex() === 0) {
-				ui.statusLabel.Text = "Duplicate instance";
-				ui.statusLabel.TextColor3 = Color3.fromRGB(239, 68, 68);
-				ui.detailStatusLabel.Text = "Another Studio is already connected as this place + role";
-				ui.detailStatusLabel.TextColor3 = Color3.fromRGB(239, 68, 68);
-			}
-			warn(
-				`[MCPPlugin] Another Studio is already connected as (${instanceId}, ${detectRole()}). Close the other Studio window or this one.`,
-			);
+		const readyUrl = `${conn.serverUrl}/ready`;
+		const readyRole = detectRole();
+		const readyLogKey = `${conn.serverUrl}|${instanceId}|${readyRole}`;
+		if (!readyOk) {
+			readyFailureLogKeys.add(readyLogKey);
+			warn(`[robloxstudio-mcp] /ready failed for ${instanceId}/${readyRole}: ${HttpDiagnostics.formatRequestFailure(readyUrl, readyOk, readyResult)}`);
 			return;
 		}
-		if (readyResult.Success) {
-			const [parseOk, readyData] = pcall(
-				() => HttpService.JSONDecode(readyResult.Body) as ReadyResponse,
-			);
-			if (parseOk && readyData.assignedRole) {
-				assignedRole = readyData.assignedRole;
+		if (!readyResult.Success) {
+			const reason = HttpDiagnostics.formatRequestFailure(readyUrl, true, readyResult);
+			readyFailureLogKeys.add(readyLogKey);
+			// 409 = duplicate_instance_role. Surface in UI and stop polling.
+			if (readyResult.StatusCode === 409) {
+				duplicateInstanceRole = true;
+				conn.isActive = false;
+				const ui = UI.getElements();
+				if (State.getActiveTabIndex() === 0) {
+					ui.statusLabel.Text = "Duplicate instance";
+					ui.statusLabel.TextColor3 = Color3.fromRGB(239, 68, 68);
+					ui.detailStatusLabel.Text = reason;
+					ui.detailStatusLabel.TextColor3 = Color3.fromRGB(239, 68, 68);
+				}
+				warn(`[robloxstudio-mcp] /ready rejected for ${instanceId}/${readyRole}: ${reason}`);
+				return;
 			}
+			warn(`[robloxstudio-mcp] /ready rejected for ${instanceId}/${readyRole}: ${reason}`);
+			return;
+		}
+		const [parseOk, readyData] = pcall(
+			() => HttpService.JSONDecode(readyResult.Body) as ReadyResponse,
+		);
+		if (parseOk && readyData.assignedRole) {
+			assignedRole = readyData.assignedRole;
+		}
+		const connectedRole = assignedRole ?? detectRole();
+		if (readyFailureLogKeys.has(readyLogKey)) {
+			readyFailureLogKeys.delete(readyLogKey);
+			print(`[robloxstudio-mcp] /ready connected for ${instanceId}/${connectedRole} via ${conn.serverUrl}`);
 		}
 	});
 }
@@ -313,7 +330,7 @@ function pollForRequests(connIndex: number) {
 			const warningKey = `${State.CURRENT_VERSION}:${serverVersion}`;
 			if (lastVersionMismatchWarningKey !== warningKey) {
 				lastVersionMismatchWarningKey = warningKey;
-				warn(`[MCPPlugin] Version mismatch: Studio plugin v${State.CURRENT_VERSION} / MCP v${serverVersion}. Run npx -y @chrrxs/robloxstudio-mcp@latest --auto-install-plugin and restart Studio.`);
+				warn(`[robloxstudio-mcp] Version mismatch: Studio plugin v${State.CURRENT_VERSION} / MCP v${serverVersion}. Run npx -y @chrrxs/robloxstudio-mcp@latest --auto-install-plugin and restart Studio.`);
 			}
 			UI.showBanner("version-mismatch", `Plugin v${State.CURRENT_VERSION} / MCP v${serverVersion} mismatch`);
 		} else if (hasVersionMismatch) {
@@ -470,6 +487,7 @@ function activatePlugin(connIndex?: number) {
 		UI.updateTabLabel(idx);
 		UI.updateUIState();
 	}
+	ServerUrlSettings.rememberServerUrl(conn.serverUrl);
 	UI.updateTabDot(idx);
 
 	if (!conn.heartbeatConnection) {

@@ -87,7 +87,14 @@ describe('HTTP Server', () => {
     });
 
     test('rejects /ready without required fields', async () => {
-      await request(app).post('/ready').send({}).expect(400);
+      const response = await request(app).post('/ready').send({ role: 'client' }).expect(400);
+      expect(response.body).toMatchObject({
+        success: false,
+        error: 'missing_ready_fields',
+        message: '/ready missing required field(s): pluginSessionId, instanceId',
+        missingFields: ['pluginSessionId', 'instanceId'],
+        request: { role: 'client' },
+      });
     });
 
     test('rejects duplicate (instanceId, role) on /ready', async () => {
@@ -96,7 +103,23 @@ describe('HTTP Server', () => {
         .post('/ready')
         .send({ ...READY_BODY, pluginSessionId: 'session-2' })
         .expect(409);
-      expect(dup.body.error).toBe('duplicate_instance_role');
+      expect(dup.body).toMatchObject({
+        success: false,
+        error: 'duplicate_instance_role',
+        message: 'Another plugin is already registered as (place:test, edit).',
+        request: {
+          instanceId: 'place:test',
+          role: 'edit',
+          placeId: 0,
+          placeName: 'TestPlace',
+          dataModelName: 'TestPlace',
+          isRunning: false,
+        },
+        existing: {
+          instanceId: 'place:test',
+          role: 'edit',
+        },
+      });
     });
 
     test('plugin disconnect by pluginSessionId', async () => {

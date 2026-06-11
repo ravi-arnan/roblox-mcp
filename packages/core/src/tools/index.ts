@@ -2206,14 +2206,27 @@ export class RobloxStudioTools {
   }
 
   async stopPlaytest(instance_id?: string) {
-    // The edit DM's stopPlaytest handler sets a plugin:SetSetting flag that
-    // StopPlayMonitor reads from inside the play-server DM (the only DM where
+    // The edit DM's stopPlaytest handler writes a plugin:SetSetting request
+    // that StopPlayMonitor reads from inside the play-server DM (the only DM where
     // StudioTestService:EndTest is legal). No edit-proxy peer registration is
     // involved — the cross-DM signal works regardless of MCP server state,
     // peer-role bookkeeping, or restart cycles.
-    const response = await this._callSingle('/api/stop-playtest', {}, 'edit', instance_id);
+    const { instanceId } = this._resolveSingleTarget('edit', instance_id);
+    const response = await this.client.request('/api/stop-playtest', {}, instanceId, 'edit');
+    let wait: { ok: boolean; roles: string[]; timedOut: boolean } | undefined;
+    if (response?.success === true) {
+      wait = await this._waitForRuntimeRoles(instanceId, { noRuntime: true }, 15);
+    }
+    const body = wait
+      ? {
+        ...response,
+        runtimeStopped: wait.ok,
+        timedOut: wait.timedOut,
+        roles: wait.roles,
+      }
+      : response;
     return {
-      content: [{ type: 'text', text: JSON.stringify(response) }],
+      content: [{ type: 'text', text: JSON.stringify(body) }],
     };
   }
 

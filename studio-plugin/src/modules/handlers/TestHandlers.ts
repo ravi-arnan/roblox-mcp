@@ -231,7 +231,7 @@ function startPlaytest(requestData: Record<string, unknown>) {
 
 	const [injected, injErr] = pcall(() => injectStopListener());
 	if (!injected) {
-		warn(`[MCP] Failed to inject stop listener: ${injErr}`);
+		warn(`[robloxstudio-mcp] Failed to inject stop listener: ${injErr}`);
 	}
 
 	task.spawn(() => {
@@ -266,15 +266,15 @@ function startPlaytest(requestData: Record<string, unknown>) {
 }
 
 function stopPlaytest(_requestData: Record<string, unknown>) {
-	// Signal the play-server DM's StopPlayMonitor via plugin:SetSetting (a
-	// cross-DM persistent store). The monitor polls at 1Hz, sees the flag,
-	// calls StudioTestService:EndTest, then resets the flag. We wait up to
-	// 2.5s for the reset to confirm a play DM actually consumed the request,
-	// which avoids returning success when nothing is running.
-	if (!StopPlayMonitor.requestStop()) {
+	// Signal the play-server DM's StopPlayMonitor via plugin:SetSetting.
+	// The monitor acknowledges with the matching request id only after its
+	// StudioTestService:EndTest call returns from pcall.
+	const stopRequest = StopPlayMonitor.requestStop();
+	if (!stopRequest.ok || stopRequest.requestId === undefined) {
 		return { error: "Plugin not ready. Try again in a moment." };
 	}
-	if (!StopPlayMonitor.waitForConsumption()) {
+	const consumption = StopPlayMonitor.waitForConsumption(stopRequest.requestId);
+	if (!consumption.ok) {
 		// Two distinct failure modes collapse here, distinguished by whether
 		// THIS edit DM has a playtest tracked:
 		//
@@ -286,19 +286,24 @@ function stopPlaytest(_requestData: Record<string, unknown>) {
 		//   from the caller's perspective — playtest may actually have ended).
 		//   Tell the caller it's a timing issue and they can retry.
 		//
-		// Either way clean up the pending flag so a future playtest's monitor
+		// Either way clean up the pending request so a future playtest's monitor
 		// doesn't fire EndTest on startup against a stale signal.
-		StopPlayMonitor.clearPending();
+		StopPlayMonitor.clearPending(stopRequest.requestId);
 		if (testRunning) {
 			return {
 				error:
-					"Playtest stop signal sent but consumption confirmation timed out. " +
+					"Playtest stop signal failed or was not acknowledged. " +
 					"The playtest may have ended anyway; check get_connected_instances.",
+				detail: consumption.error,
 			};
 		}
-		return { error: "No active playtest to stop." };
+		if (consumption.consumed) {
+			return { error: "Playtest stop request reached the play server, but EndTest failed.", detail: consumption.error };
+		}
+		return { error: "No active playtest to stop.", detail: consumption.error };
 	}
-	// Flag was consumed (EndTest called). ExecutePlayModeAsync in our
+	StopPlayMonitor.clearPending(stopRequest.requestId);
+	// Request was consumed (EndTest called). ExecutePlayModeAsync in our
 	// startPlaytest task.spawn is still unwinding though — testRunning stays
 	// true until that yield completes and the post-block runs. Wait so
 	// back-to-back stop -> start sequences don't race against the prior

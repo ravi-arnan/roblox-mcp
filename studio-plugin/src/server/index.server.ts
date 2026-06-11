@@ -2,6 +2,7 @@ import State from "../modules/State";
 import UI from "../modules/UI";
 import Communication from "../modules/Communication";
 import ClientBroker from "../modules/ClientBroker";
+import ServerUrlSettings from "../modules/ServerUrlSettings";
 import { cleanupLegacyEditBridges, ensureRuntimeBridgeInstalled } from "../modules/EvalBridges";
 import RuntimeLogBuffer from "../modules/RuntimeLogBuffer";
 import StopPlayMonitor from "../modules/StopPlayMonitor";
@@ -21,6 +22,7 @@ RuntimeLogBuffer.install();
 // edit DM (write the flag) and the play-server DM (read+act on the flag) can
 // access plugin:SetSetting/GetSetting.
 StopPlayMonitor.init(plugin);
+ServerUrlSettings.init(plugin);
 
 UI.init(plugin);
 const elements = UI.getElements();
@@ -79,7 +81,7 @@ task.delay(2, () => {
 	} else {
 		const result = ensureRuntimeBridgeInstalled();
 		if (!result.installed) {
-			warn(`[MCPPlugin] Runtime eval bridge install failed: ${result.error}`);
+			warn(`[robloxstudio-mcp] Runtime eval bridge install failed: ${result.error}`);
 		}
 	}
 	if (role === "edit" || role === "server") {
@@ -87,10 +89,19 @@ task.delay(2, () => {
 			const idx = State.getActiveTabIndex();
 			const conn = State.getConnection(idx);
 			if (conn && !conn.isActive) {
+				if (role === "server") {
+					const inheritedServerUrl = ServerUrlSettings.readServerUrl() ?? ClientBroker.DEFAULT_MCP_URL;
+					conn.serverUrl = inheritedServerUrl;
+					elements.urlInput.Text = inheritedServerUrl;
+					const [portStr] = conn.serverUrl.match(":(%d+)$");
+					if (portStr) conn.port = tonumber(portStr) ?? conn.port;
+					ClientBroker.setServerUrl(inheritedServerUrl);
+				}
 				// Defensive default: in invisible play-DM UIs, the input field
 				// may not be populated by the time we activate.
 				if (conn.serverUrl === undefined || conn.serverUrl === "") {
-					conn.serverUrl = ClientBroker.MCP_URL;
+					conn.serverUrl = ClientBroker.DEFAULT_MCP_URL;
+					elements.urlInput.Text = conn.serverUrl;
 				}
 				Communication.activatePlugin(idx);
 			}
@@ -99,8 +110,8 @@ task.delay(2, () => {
 	if (role === "server") {
 		ClientBroker.setupServerBroker();
 		// The play-server DM is the only one where StudioTestService:EndTest is
-		// legal, so the stop-play monitor lives here. Reads MCP_STOP_PLAY_SIGNAL
-		// at 1Hz and calls EndTest when the edit DM sets it.
+		// legal, so the stop-play monitor lives here. It consumes tokenized
+		// stop requests from plugin settings and acknowledges EndTest results.
 		StopPlayMonitor.startMonitor();
 	} else if (role === "client") {
 		ClientBroker.setupClientBroker();
