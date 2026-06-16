@@ -231,6 +231,62 @@ describe('Smoke', () => {
     expect(body.roles).toEqual(['edit']);
   });
 
+  test('stop_playtest accepts stale anon id after publish and waits for runtime peers', async () => {
+    const bridge = new BridgeService();
+    const tools = new RobloxStudioTools(bridge);
+    bridge.registerInstance({
+      ...READY,
+      pluginSessionId: 'edit-stale',
+      instanceId: 'anon:old-file-id',
+      placeId: 0,
+    });
+    bridge.updateInstanceMetadata('edit-stale', { placeId: 12345 });
+    bridge.registerInstance({
+      pluginSessionId: 'server-1',
+      instanceId: 'place:12345',
+      role: 'server',
+      placeId: 12345,
+      placeName: 'TestPlace',
+      dataModelName: 'TestPlace',
+      isRunning: true,
+    });
+    bridge.registerInstance({
+      pluginSessionId: 'client-1',
+      instanceId: 'place:12345',
+      role: 'client',
+      placeId: 12345,
+      placeName: 'TestPlace',
+      dataModelName: 'TestPlace',
+      isRunning: true,
+    });
+
+    const resultPromise = tools.stopPlaytest('anon:old-file-id');
+    const pending = bridge.getPendingRequest('place:12345', 'edit');
+    expect(pending).toBeTruthy();
+    bridge.resolveRequest(pending!.requestId, { success: true, message: 'stopping' });
+
+    let settled = false;
+    void resultPromise.then(() => {
+      settled = true;
+    }, () => {
+      settled = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(settled).toBe(false);
+
+    bridge.unregisterInstance('server-1');
+    bridge.unregisterInstance('client-1');
+
+    const result = await resultPromise;
+    const body = JSON.parse(result.content[0].text);
+    expect(body).toMatchObject({
+      success: true,
+      runtimeStopped: true,
+      timedOut: false,
+    });
+    expect(body.roles).toEqual(['edit']);
+  });
+
   test('get_scene_analysis fans out to connected peers', async () => {
     const bridge = new BridgeService();
     const tools = new RobloxStudioTools(bridge);

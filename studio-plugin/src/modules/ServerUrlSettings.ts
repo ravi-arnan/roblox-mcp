@@ -8,17 +8,26 @@ function init(p: Plugin): void {
 	pluginRef = p;
 }
 
-function computeInstanceId(): string {
+function addUnique(values: string[], value: string): void {
+	if (!values.includes(value)) {
+		values.push(value);
+	}
+}
+
+function computeInstanceIds(): string[] {
+	const ids: string[] = [];
 	if (game.PlaceId !== 0) {
-		return `place:${tostring(game.PlaceId)}`;
+		addUnique(ids, `place:${tostring(game.PlaceId)}`);
 	}
 	const existing = ServerStorage.GetAttribute("__MCPPlaceId");
 	if (typeIs(existing, "string") && existing !== "") {
-		return `anon:${existing as string}`;
+		addUnique(ids, `anon:${existing as string}`);
+	} else if (game.PlaceId === 0) {
+		const fresh = HttpService.GenerateGUID(false);
+		pcall(() => ServerStorage.SetAttribute("__MCPPlaceId", fresh));
+		addUnique(ids, `anon:${fresh}`);
 	}
-	const fresh = HttpService.GenerateGUID(false);
-	pcall(() => ServerStorage.SetAttribute("__MCPPlaceId", fresh));
-	return `anon:${fresh}`;
+	return ids;
 }
 
 function settingKey(instanceId: string): string {
@@ -27,16 +36,20 @@ function settingKey(instanceId: string): string {
 
 function rememberServerUrl(serverUrl: string): void {
 	if (!pluginRef || serverUrl === "") return;
-	const key = settingKey(computeInstanceId());
-	pcall(() => pluginRef!.SetSetting(key, serverUrl));
+	for (const instanceId of computeInstanceIds()) {
+		const key = settingKey(instanceId);
+		pcall(() => pluginRef!.SetSetting(key, serverUrl));
+	}
 }
 
 function readServerUrl(): string | undefined {
 	if (!pluginRef) return undefined;
-	const key = settingKey(computeInstanceId());
-	const [ok, value] = pcall(() => pluginRef!.GetSetting(key));
-	if (ok && typeIs(value, "string") && value !== "") {
-		return value as string;
+	for (const instanceId of computeInstanceIds()) {
+		const key = settingKey(instanceId);
+		const [ok, value] = pcall(() => pluginRef!.GetSetting(key));
+		if (ok && typeIs(value, "string") && value !== "") {
+			return value as string;
+		}
 	}
 	return undefined;
 }

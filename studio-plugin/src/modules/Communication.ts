@@ -47,11 +47,11 @@ function computeInstanceId(): string {
 	return `anon:${fresh}`;
 }
 
-const instanceId = computeInstanceId();
 let assignedRole: string | undefined;
 let duplicateInstanceRole = false;
 let hasVersionMismatch = false;
 let lastVersionMismatchWarningKey: string | undefined;
+let lastReadyInstanceId: string | undefined;
 const readyFailureLogKeys = new Set<string>();
 
 // Cache the published place name from MarketplaceService:GetProductInfo so
@@ -59,9 +59,12 @@ const readyFailureLogKeys = new Set<string>();
 // from game.Name (the DataModel name, often "Place1" in edit). We only fetch
 // once per plugin load; the published name doesn't change mid-session.
 let cachedPlaceName: string | undefined;
+let cachedPlaceNamePlaceId: number | undefined;
 
 function resolvePlaceName(): string {
-	if (cachedPlaceName !== undefined) return cachedPlaceName;
+	if (cachedPlaceName !== undefined && cachedPlaceNamePlaceId === game.PlaceId) return cachedPlaceName;
+	cachedPlaceName = undefined;
+	cachedPlaceNamePlaceId = game.PlaceId;
 	if (game.PlaceId === 0) {
 		cachedPlaceName = game.Name;
 		return cachedPlaceName;
@@ -209,21 +212,31 @@ function getConnectionStatus(connIndex: number): string {
 // restarted but hasn't seen our re-ready yet would fire a duplicate /ready.
 let lastReadyPostAt = 0;
 
-// game.Name is sometimes "Place1" at plugin-load time and only settles to
-// the real DataModel name (e.g. "Game" once playtest spawns the play DM)
-// after Studio finishes wiring things up. Re-fire /ready when it changes so
-// get_connected_instances doesn't show a stale dataModelName forever. Set
-// up once per plugin load — the connection passed in is whichever was
-// active when activatePlugin was first called.
+// game.Name and game.PlaceId can both settle after plugin load. PlaceId also
+// changes when an unpublished file is published while MCP is already active.
+// Re-fire /ready so the bridge can migrate anon:<uuid> to place:<PlaceId>.
 let nameChangeConn: RBXScriptConnection | undefined;
-function ensureNameChangeWatcher(conn: Connection): void {
-	if (nameChangeConn) return;
-	const [okSig, signal] = pcall(() => game.GetPropertyChangedSignal("Name"));
-	if (!okSig || !signal) return;
-	nameChangeConn = signal.Connect(() => {
-		// sendReady has its own 2s throttle, so rapid burst changes coalesce.
-		sendReady(conn);
-	});
+let placeIdChangeConn: RBXScriptConnection | undefined;
+function ensureIdentityWatcher(conn: Connection): void {
+	if (!nameChangeConn) {
+		const [okSig, signal] = pcall(() => game.GetPropertyChangedSignal("Name"));
+		if (okSig && signal) {
+			nameChangeConn = signal.Connect(() => {
+				// sendReady has its own 2s throttle, so rapid burst changes coalesce.
+				sendReady(conn);
+			});
+		}
+	}
+	if (!placeIdChangeConn) {
+		const [okSig, signal] = pcall(() => game.GetPropertyChangedSignal("PlaceId"));
+		if (okSig && signal) {
+			placeIdChangeConn = signal.Connect(() => {
+				cachedPlaceName = undefined;
+				cachedPlaceNamePlaceId = undefined;
+				sendReady(conn);
+			});
+		}
+	}
 }
 
 function sendReady(conn: Connection): void {
@@ -231,6 +244,7 @@ function sendReady(conn: Connection): void {
 	const now = tick();
 	if (now - lastReadyPostAt < 2) return; // throttle to ≤1 /ready every 2s
 	lastReadyPostAt = now;
+	const instanceId = computeInstanceId();
 	task.spawn(() => {
 		const [readyOk, readyResult] = pcall(() => {
 			return HttpService.RequestAsync({
@@ -286,6 +300,9 @@ function sendReady(conn: Connection): void {
 		if (parseOk && readyData.assignedRole) {
 			assignedRole = readyData.assignedRole;
 		}
+		lastReadyInstanceId = parseOk && typeIs(readyData.instanceId, "string") && readyData.instanceId !== ""
+			? readyData.instanceId
+			: instanceId;
 		const connectedRole = assignedRole ?? detectRole();
 		if (readyFailureLogKeys.has(readyLogKey)) {
 			readyFailureLogKeys.delete(readyLogKey);
@@ -493,6 +510,12 @@ function activatePlugin(connIndex?: number) {
 	if (!conn.heartbeatConnection) {
 		conn.heartbeatConnection = RunService.Heartbeat.Connect(() => {
 			const now = tick();
+			const currentInstanceId = computeInstanceId();
+			if (lastReadyInstanceId !== undefined && currentInstanceId !== lastReadyInstanceId) {
+				cachedPlaceName = undefined;
+				cachedPlaceNamePlaceId = undefined;
+				sendReady(conn);
+			}
 			const currentInterval = conn.consecutiveFailures > 5 ? conn.currentRetryDelay : conn.pollInterval;
 			if (now - conn.lastPoll > currentInterval) {
 				conn.lastPoll = now;
@@ -511,9 +534,8 @@ function activatePlugin(connIndex?: number) {
 		task.spawn(cleanupLegacyEditBridges);
 	}
 
-	// Watch for game.Name updates so a stale "Place1" captured at first
-	// /ready gets refreshed once Studio settles on the real DM name.
-	ensureNameChangeWatcher(conn);
+	// Watch identity fields so stale name or anon instance ids are refreshed.
+	ensureIdentityWatcher(conn);
 }
 
 function deactivatePlugin(connIndex?: number) {

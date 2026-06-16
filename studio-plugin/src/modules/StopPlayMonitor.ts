@@ -1,6 +1,9 @@
 // Cross-DM stop_playtest signaling via plugin:SetSetting, scoped by
 // per-instance setting key so the same Studio process can host playtests
 // for multiple places without one place's stop_playtest yanking another's.
+// During publish-after-connect, both "anon:<uuid>" and "place:<PlaceId>"
+// can refer to the same Studio place, so stop requests are mirrored across
+// both keys while the monitor waits for a matching result on either key.
 //
 // `plugin:SetSetting` / `plugin:GetSetting` is a per-plugin persistent store
 // shared across every DataModel the plugin runs in (edit DMs, play-server
@@ -71,21 +74,34 @@ function init(p: Plugin): void {
 // agree on the place identifier (published places: placeId; unpublished:
 // UUID on ServerStorage's __MCPPlaceId attribute, travels with the .rbxl
 // into the play DM).
-function computeInstanceId(): string {
+function addUnique(values: string[], value: string): void {
+	if (!values.includes(value)) {
+		values.push(value);
+	}
+}
+
+function computeInstanceIds(): string[] {
+	const ids: string[] = [];
 	if (game.PlaceId !== 0) {
-		return `place:${tostring(game.PlaceId)}`;
+		addUnique(ids, `place:${tostring(game.PlaceId)}`);
 	}
 	const existing = ServerStorage.GetAttribute("__MCPPlaceId");
 	if (typeIs(existing, "string") && existing !== "") {
-		return `anon:${existing as string}`;
+		addUnique(ids, `anon:${existing as string}`);
+	} else if (game.PlaceId === 0) {
+		const fresh = HttpService.GenerateGUID(false);
+		pcall(() => ServerStorage.SetAttribute("__MCPPlaceId", fresh));
+		addUnique(ids, `anon:${fresh}`);
 	}
-	const fresh = HttpService.GenerateGUID(false);
-	pcall(() => ServerStorage.SetAttribute("__MCPPlaceId", fresh));
-	return `anon:${fresh}`;
+	return ids;
 }
 
 function settingKey(instanceId: string): string {
 	return SETTING_KEY_PREFIX + instanceId;
+}
+
+function settingKeys(): string[] {
+	return computeInstanceIds().map((instanceId) => settingKey(instanceId));
 }
 
 function readSetting(key: string): unknown {
@@ -168,18 +184,19 @@ function startMonitor(): void {
 		warn("[robloxstudio-mcp] StopPlayMonitor.startMonitor called before init; skipping");
 		return;
 	}
-	const myKey = settingKey(computeInstanceId());
 	task.spawn(() => {
 		while (true) {
-			const value = readSetting(myKey);
-			if (value === true) {
-				// Legacy boolean requests are ambiguous and may be stale from
-				// a prior crashed session. New stop requests use token payloads.
-				writeSetting(myKey, false);
-			} else {
-				const payload = decodePayload(value);
-				if (payload) {
-					handleStopRequest(myKey, payload);
+			for (const myKey of settingKeys()) {
+				const value = readSetting(myKey);
+				if (value === true) {
+					// Legacy boolean requests are ambiguous and may be stale from
+					// a prior crashed session. New stop requests use token payloads.
+					writeSetting(myKey, false);
+				} else {
+					const payload = decodePayload(value);
+					if (payload) {
+						handleStopRequest(myKey, payload);
+					}
 				}
 			}
 			task.wait(POLL_INTERVAL_SEC);
@@ -189,28 +206,32 @@ function startMonitor(): void {
 
 function requestStop(): StopRequestResult {
 	if (!pluginRef) return { ok: false };
-	const myKey = settingKey(computeInstanceId());
 	const requestId = HttpService.GenerateGUID(false);
-	const ok = writePayload(myKey, {
+	const payload: StopPayload = {
 		kind: "request",
 		id: requestId,
 		requestedAt: tick(),
-	});
+	};
+	let ok = false;
+	for (const myKey of settingKeys()) {
+		ok = writePayload(myKey, payload) || ok;
+	}
 	return { ok, requestId: ok ? requestId : undefined };
 }
 
 function waitForConsumption(requestId: string): StopConsumptionResult {
 	if (!pluginRef) return { ok: false, consumed: false, error: "Plugin reference is not initialized." };
-	const myKey = settingKey(computeInstanceId());
 	const start = tick();
 	while (tick() - start < WAIT_FOR_CONSUMPTION_TIMEOUT_SEC) {
-		const payload = decodePayload(readSetting(myKey));
-		if (payload && payload.kind === "result" && payload.id === requestId) {
-			return {
-				ok: payload.ok === true,
-				consumed: true,
-				error: payload.error,
-			};
+		for (const myKey of settingKeys()) {
+			const payload = decodePayload(readSetting(myKey));
+			if (payload && payload.kind === "result" && payload.id === requestId) {
+				return {
+					ok: payload.ok === true,
+					consumed: true,
+					error: payload.error,
+				};
+			}
 		}
 		task.wait(WAIT_POLL_SEC);
 	}
@@ -223,12 +244,13 @@ function waitForConsumption(requestId: string): StopConsumptionResult {
 
 function clearPending(requestId?: string): void {
 	if (!pluginRef) return;
-	const myKey = settingKey(computeInstanceId());
-	if (requestId !== undefined) {
-		const payload = decodePayload(readSetting(myKey));
-		if (payload && payload.id !== requestId) return;
+	for (const myKey of settingKeys()) {
+		if (requestId !== undefined) {
+			const payload = decodePayload(readSetting(myKey));
+			if (payload && payload.id !== requestId) continue;
+		}
+		writeSetting(myKey, false);
 	}
-	writeSetting(myKey, false);
 }
 
 export = {

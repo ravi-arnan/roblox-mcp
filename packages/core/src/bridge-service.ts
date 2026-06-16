@@ -124,15 +124,97 @@ export function toPublic(inst: PluginInstance): PublicPluginInstance {
 }
 
 const STALE_INSTANCE_MS = 30000;
+const INSTANCE_ALIAS_TTL_MS = 5 * 60 * 1000;
+
+interface InstanceAlias {
+  targetInstanceId: string;
+  lastSeen: number;
+}
+
+function publishedInstanceId(placeId: number | undefined): string | undefined {
+  if (placeId === undefined || !Number.isFinite(placeId) || placeId <= 0) return undefined;
+  return `place:${Math.trunc(placeId)}`;
+}
 
 export class BridgeService {
   private pendingRequests: Map<string, PendingRequest> = new Map();
   // Keyed by pluginSessionId (the per-plugin GUID).
   private instances: Map<string, PluginInstance> = new Map();
+  private instanceAliases: Map<string, InstanceAlias> = new Map();
   private requestTimeout = 30000;
 
+  private canonicalInstanceId(instanceId: string, placeId?: number): string {
+    return publishedInstanceId(placeId) ?? instanceId;
+  }
+
+  private rememberInstanceAlias(aliasInstanceId: string, targetInstanceId: string) {
+    if (aliasInstanceId === targetInstanceId) return;
+    this.instanceAliases.set(aliasInstanceId, {
+      targetInstanceId,
+      lastSeen: Date.now(),
+    });
+  }
+
+  private resolveInstanceAlias(instanceId: string): string {
+    const alias = this.instanceAliases.get(instanceId);
+    if (!alias) return instanceId;
+    alias.lastSeen = Date.now();
+    return alias.targetInstanceId;
+  }
+
+  private migratePendingRequests(fromInstanceId: string, toInstanceId: string) {
+    if (fromInstanceId === toInstanceId) return;
+    for (const request of this.pendingRequests.values()) {
+      if (request.targetInstanceId === fromInstanceId) {
+        request.targetInstanceId = toInstanceId;
+      }
+    }
+  }
+
+  private cleanupStaleAliases(now = Date.now()) {
+    for (const [alias, entry] of this.instanceAliases.entries()) {
+      const targetIsLive = this.getInstances().some((inst) => inst.instanceId === entry.targetInstanceId);
+      if (!targetIsLive && now - entry.lastSeen > INSTANCE_ALIAS_TTL_MS) {
+        this.instanceAliases.delete(alias);
+      }
+    }
+  }
+
+  private routingKeyForInstance(inst: PluginInstance): string {
+    return publishedInstanceId(inst.placeId) ?? this.resolveInstanceAlias(inst.instanceId);
+  }
+
+  private matchingInstancesForInstanceId(instanceId: string): PluginInstance[] {
+    const resolvedInstanceId = this.resolveInstanceAlias(instanceId);
+    const ids = new Set<string>([instanceId, resolvedInstanceId]);
+    const placeIds = new Set<number>();
+    const addPlaceId = (placeId: number | undefined) => {
+      const published = publishedInstanceId(placeId);
+      if (!published || placeId === undefined) return;
+      ids.add(published);
+      placeIds.add(Math.trunc(placeId));
+    };
+
+    const placeMatch = resolvedInstanceId.match(/^place:(\d+)$/) ?? instanceId.match(/^place:(\d+)$/);
+    if (placeMatch) addPlaceId(Number(placeMatch[1]));
+
+    for (const inst of this.getInstances()) {
+      if (ids.has(inst.instanceId)) addPlaceId(inst.placeId);
+    }
+
+    return this.getInstances().filter(
+      (inst) => ids.has(inst.instanceId) || (inst.placeId > 0 && placeIds.has(Math.trunc(inst.placeId))),
+    );
+  }
+
+  resolveInstanceId(instanceId: string): string {
+    return this.resolveInstanceAlias(instanceId);
+  }
+
   registerInstance(input: RegisterInstanceInput): RegisterInstanceResult {
-    const { pluginSessionId, instanceId, role } = input;
+    const { pluginSessionId, role } = input;
+    const rawInstanceId = input.instanceId;
+    const instanceId = this.canonicalInstanceId(rawInstanceId, input.placeId);
     const prior = this.instances.get(pluginSessionId);
     let assignedRole = role;
     const pluginVersion = input.pluginVersion ?? '';
@@ -140,11 +222,17 @@ export class BridgeService {
     const serverVersion = input.serverVersion ?? '';
     const versionMismatch = pluginVersion !== '' && serverVersion !== '' && pluginVersion !== serverVersion;
 
+    this.rememberInstanceAlias(rawInstanceId, instanceId);
+    if (prior && prior.instanceId !== instanceId) {
+      this.rememberInstanceAlias(prior.instanceId, instanceId);
+      this.migratePendingRequests(prior.instanceId, instanceId);
+    }
+
     // Client roles get lowest-unused-N, scoped per place. That keeps
     // target=client-1 intuitive when several Studio places are connected:
     // client-1 always means the first client for the selected instance_id.
     if (role === 'client') {
-      if (prior && prior.instanceId === instanceId && prior.role.match(/^client-\d+$/)) {
+      if (prior && prior.role.match(/^client-\d+$/)) {
         assignedRole = prior.role;
       } else {
         const used = new Set<number>();
@@ -241,10 +329,25 @@ export class BridgeService {
   updateInstanceMetadata(pluginSessionId: string, metadata: Partial<Pick<PluginInstance, 'placeId' | 'placeName' | 'dataModelName' | 'isRunning'>>) {
     const inst = this.instances.get(pluginSessionId);
     if (!inst) return;
+    const priorInstanceId = inst.instanceId;
     if (metadata.placeId !== undefined) inst.placeId = metadata.placeId;
     if (metadata.placeName !== undefined) inst.placeName = metadata.placeName;
     if (metadata.dataModelName !== undefined) inst.dataModelName = metadata.dataModelName;
     if (metadata.isRunning !== undefined) inst.isRunning = metadata.isRunning;
+    const canonicalInstanceId = this.canonicalInstanceId(inst.instanceId, inst.placeId);
+    if (canonicalInstanceId !== inst.instanceId) {
+      const duplicate = Array.from(this.instances.values()).find(
+        (other) =>
+          other.pluginSessionId !== pluginSessionId &&
+          other.instanceId === canonicalInstanceId &&
+          other.role === inst.role,
+      );
+      if (!duplicate) {
+        this.rememberInstanceAlias(priorInstanceId, canonicalInstanceId);
+        this.migratePendingRequests(priorInstanceId, canonicalInstanceId);
+        inst.instanceId = canonicalInstanceId;
+      }
+    }
   }
 
   cleanupStaleInstances() {
@@ -254,6 +357,41 @@ export class BridgeService {
         this.unregisterInstance(id);
       }
     }
+    this.cleanupStaleAliases(now);
+  }
+
+  getEquivalentInstanceIds(instanceId: string): string[] {
+    const resolvedInstanceId = this.resolveInstanceAlias(instanceId);
+    const ids = new Set<string>([instanceId, resolvedInstanceId]);
+    const placeIds = new Set<number>();
+
+    const addPlaceId = (placeId: number | undefined) => {
+      const published = publishedInstanceId(placeId);
+      if (!published || placeId === undefined) return;
+      ids.add(published);
+      placeIds.add(Math.trunc(placeId));
+    };
+
+    const placeMatch = resolvedInstanceId.match(/^place:(\d+)$/) ?? instanceId.match(/^place:(\d+)$/);
+    if (placeMatch) addPlaceId(Number(placeMatch[1]));
+
+    for (const inst of this.getInstances()) {
+      if (ids.has(inst.instanceId)) {
+        addPlaceId(inst.placeId);
+      }
+    }
+
+    for (const inst of this.getInstances()) {
+      if (inst.placeId > 0 && placeIds.has(Math.trunc(inst.placeId))) {
+        ids.add(inst.instanceId);
+      }
+    }
+
+    for (const [alias, entry] of this.instanceAliases.entries()) {
+      if (ids.has(entry.targetInstanceId)) ids.add(alias);
+    }
+
+    return Array.from(ids);
   }
 
   // Resolves (instance_id, target-role) MCP arguments to a concrete
@@ -271,7 +409,7 @@ export class BridgeService {
 
     // Case 1: instance_id provided
     if (instance_id !== undefined) {
-      const matchingInstances = instances.filter((i) => i.instanceId === instance_id);
+      const matchingInstances = this.matchingInstancesForInstanceId(instance_id);
       if (matchingInstances.length === 0) {
         return {
           ok: false,
@@ -307,7 +445,7 @@ export class BridgeService {
             },
           };
         }
-        return { ok: true, mode: 'single', targetInstanceId: instance_id, targetRole: role };
+        return { ok: true, mode: 'single', targetInstanceId: exact.instanceId, targetRole: role };
       }
 
       // role omitted, instance_id provided
@@ -315,14 +453,14 @@ export class BridgeService {
         return {
           ok: true,
           mode: 'single',
-          targetInstanceId: instance_id,
+          targetInstanceId: matchingInstances[0].instanceId,
           targetRole: matchingInstances[0].role,
         };
       }
       // Multiple roles for that instance — prefer edit if present.
       const edit = matchingInstances.find((i) => i.role === 'edit');
       if (edit) {
-        return { ok: true, mode: 'single', targetInstanceId: instance_id, targetRole: 'edit' };
+        return { ok: true, mode: 'single', targetInstanceId: edit.instanceId, targetRole: 'edit' };
       }
       return {
         ok: false,
@@ -335,7 +473,7 @@ export class BridgeService {
     }
 
     // Case 2: instance_id omitted — distinct instanceIds across connected plugins
-    const distinctInstanceIds = new Set(instances.map((i) => i.instanceId));
+    const distinctInstanceIds = new Set(instances.map((i) => this.routingKeyForInstance(i)));
     if (distinctInstanceIds.size === 0) {
       // No connected instances at all. Caller will hit a separate timeout/
       // not-connected error; return a clear routing error here too.
@@ -358,7 +496,7 @@ export class BridgeService {
 
     // Exactly one distinct instance_id connected. Apply role resolution
     // identically to the instance_id-provided path.
-    const onlyInstanceId = instances[0].instanceId;
+    const onlyInstanceId = distinctInstanceIds.values().next().value;
     return this.resolveTarget({ instance_id: onlyInstanceId, target });
   }
 

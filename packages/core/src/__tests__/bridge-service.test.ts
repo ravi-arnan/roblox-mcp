@@ -1,5 +1,15 @@
 import { BridgeService } from '../bridge-service.js';
 
+class MirroredBridgeService extends BridgeService {
+  constructor(private readonly mirroredInstances: ReturnType<BridgeService['getInstances']>) {
+    super();
+  }
+
+  override getInstances() {
+    return this.mirroredInstances;
+  }
+}
+
 function register(b: BridgeService, opts: { pluginSessionId: string; instanceId: string; role: string; placeId?: number; placeName?: string }) {
   const res = b.registerInstance({
     pluginSessionId: opts.pluginSessionId,
@@ -96,6 +106,94 @@ describe('BridgeService', () => {
   });
 
   describe('registerInstance', () => {
+    test('canonicalizes published places when a stale anon id is reported', () => {
+      const r = register(bridge, {
+        pluginSessionId: 'edit',
+        instanceId: 'anon:old-file-id',
+        role: 'edit',
+        placeId: 12345,
+      });
+
+      expect(r.instanceId).toBe('place:12345');
+      expect(bridge.getPublicInstances()[0].instanceId).toBe('place:12345');
+
+      const resolved = bridge.resolveTarget({ instance_id: 'anon:old-file-id', target: 'edit' });
+      expect(resolved.ok).toBe(true);
+      if (!resolved.ok || resolved.mode !== 'single') throw new Error('expected single');
+      expect(resolved.targetInstanceId).toBe('place:12345');
+      expect(resolved.targetRole).toBe('edit');
+    });
+
+    test('metadata updates migrate stale anon edit to the published place id', () => {
+      register(bridge, { pluginSessionId: 'edit', instanceId: 'anon:old-file-id', role: 'edit' });
+      bridge.updateInstanceMetadata('edit', { placeId: 12345 });
+      register(bridge, { pluginSessionId: 'server', instanceId: 'place:12345', role: 'server', placeId: 12345 });
+
+      expect(bridge.getPublicInstances().map((inst) => inst.instanceId).sort()).toEqual(['place:12345', 'place:12345']);
+
+      const editFromPublished = bridge.resolveTarget({ instance_id: 'place:12345', target: 'edit' });
+      expect(editFromPublished.ok).toBe(true);
+      if (!editFromPublished.ok || editFromPublished.mode !== 'single') throw new Error('expected single');
+      expect(editFromPublished.targetInstanceId).toBe('place:12345');
+      expect(editFromPublished.targetRole).toBe('edit');
+
+      const serverFromAnon = bridge.resolveTarget({ instance_id: 'anon:old-file-id', target: 'server' });
+      expect(serverFromAnon.ok).toBe(true);
+      if (!serverFromAnon.ok || serverFromAnon.mode !== 'single') throw new Error('expected single');
+      expect(serverFromAnon.targetInstanceId).toBe('place:12345');
+      expect(serverFromAnon.targetRole).toBe('server');
+
+      const omittedInstance = bridge.resolveTarget({ target: 'edit' });
+      expect(omittedInstance.ok).toBe(true);
+      if (!omittedInstance.ok || omittedInstance.mode !== 'single') throw new Error('expected single');
+      expect(omittedInstance.targetInstanceId).toBe('place:12345');
+      expect(omittedInstance.targetRole).toBe('edit');
+    });
+
+    test('migrates pending requests when an anon place becomes published', async () => {
+      register(bridge, { pluginSessionId: 'edit', instanceId: 'anon:old-file-id', role: 'edit' });
+      const pending = bridge.sendRequest('/api/test', {}, 'anon:old-file-id', 'edit');
+
+      const r = register(bridge, {
+        pluginSessionId: 'edit',
+        instanceId: 'anon:old-file-id',
+        role: 'edit',
+        placeId: 12345,
+      });
+      expect(r.instanceId).toBe('place:12345');
+
+      const polled = bridge.getPendingRequest('place:12345', 'edit');
+      expect(polled).toBeTruthy();
+      bridge.resolveRequest(polled!.requestId, { ok: true });
+      await expect(pending).resolves.toEqual({ ok: true });
+    });
+
+    test('routing works for proxy-style bridges that mirror instances via getInstances', () => {
+      const mirrored = new MirroredBridgeService([
+        {
+          pluginSessionId: 'edit',
+          instanceId: 'anon:mirrored-place-id',
+          role: 'edit',
+          placeId: 0,
+          placeName: 'MirroredPlace',
+          dataModelName: 'MirroredPlace',
+          isRunning: false,
+          pluginVersion: '2.16.1',
+          pluginVariant: 'main',
+          serverVersion: '2.16.1',
+          versionMismatch: false,
+          lastActivity: Date.now(),
+          connectedAt: Date.now(),
+        },
+      ]);
+
+      const resolved = mirrored.resolveTarget({ instance_id: 'anon:mirrored-place-id', target: 'edit' });
+      expect(resolved.ok).toBe(true);
+      if (!resolved.ok || resolved.mode !== 'single') throw new Error('expected single');
+      expect(resolved.targetInstanceId).toBe('anon:mirrored-place-id');
+      expect(resolved.targetRole).toBe('edit');
+    });
+
     test('first client gets client-1', () => {
       const r = register(bridge, { pluginSessionId: 'a', instanceId: 'place:1', role: 'client' });
       expect(r.assignedRole).toBe('client-1');

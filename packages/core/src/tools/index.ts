@@ -551,13 +551,15 @@ export class RobloxStudioTools {
     // resolveTarget(target=undefined) prefers the edit role and always returns
     // a single target, so targetInstanceId is the resolved place.
     const resolvedId = (r as { targetInstanceId: string }).targetInstanceId;
-    const roles = this.bridge
+    const equivalentIds = new Set(this.bridge.getEquivalentInstanceIds(resolvedId));
+    const instances = this.bridge
       .getInstances()
-      .filter((i) => i.instanceId === resolvedId)
-      .map((i) => i.role);
+      .filter((i) => equivalentIds.has(i.instanceId));
     // Prefer client-1 when several clients are connected (multi-client playtest).
-    const clientRoles = roles.filter((role) => role.startsWith('client')).sort();
-    return { instanceId: resolvedId, clientRole: clientRoles[0] };
+    const client = instances
+      .filter((inst) => inst.role.startsWith('client'))
+      .sort((a, b) => a.role.localeCompare(b.role))[0];
+    return { instanceId: client?.instanceId ?? resolvedId, clientRole: client?.role };
   }
 
   private _resolveInstanceIdOnly(instance_id?: string): string {
@@ -566,14 +568,15 @@ export class RobloxStudioTools {
     const errorData = { instances: publicList, count: publicList.length };
 
     if (instance_id !== undefined) {
-      if (!instances.some((i) => i.instanceId === instance_id)) {
+      const resolvedInstanceId = this.bridge.resolveInstanceId(instance_id);
+      if (!instances.some((i) => i.instanceId === resolvedInstanceId)) {
         throw new RoutingFailure({
           code: 'unrecognized_instance_id',
           message: `instance_id "${instance_id}" is not connected. Pass one from data.instances.`,
           data: errorData,
         });
       }
-      return instance_id;
+      return resolvedInstanceId;
     }
 
     const distinct = Array.from(new Set(instances.map((i) => i.instanceId)));
@@ -613,6 +616,13 @@ export class RobloxStudioTools {
   private _rolesForInstance(instanceId: string): string[] {
     return this.bridge.getInstances()
       .filter((i) => i.instanceId === instanceId)
+      .map((i) => i.role);
+  }
+
+  private _rolesForEquivalentInstances(instanceId: string): string[] {
+    const instanceIds = new Set(this.bridge.getEquivalentInstanceIds(instanceId));
+    return this.bridge.getInstances()
+      .filter((i) => instanceIds.has(i.instanceId))
       .map((i) => i.role);
   }
 
@@ -827,12 +837,16 @@ export class RobloxStudioTools {
     instanceId: string,
     opts: { server?: boolean; clientCount?: number; absentRole?: string; noRuntime?: boolean },
     timeoutSec = 30,
+    equivalentInstances = false,
   ): Promise<{ ok: boolean; roles: string[]; timedOut: boolean }> {
     const deadline = Date.now() + timeoutSec * 1000;
     while (Date.now() < deadline) {
-      const roles = this._rolesForInstance(instanceId);
+      const roles = equivalentInstances ? this._rolesForEquivalentInstances(instanceId) : this._rolesForInstance(instanceId);
+      const clientRoles = equivalentInstances
+        ? roles.filter((role) => /^client-\d+$/.test(role))
+        : this._clientRolesForInstance(instanceId);
       const hasServer = !opts.server || roles.includes('server');
-      const hasClients = opts.clientCount === undefined || this._clientRolesForInstance(instanceId).length >= opts.clientCount;
+      const hasClients = opts.clientCount === undefined || clientRoles.length >= opts.clientCount;
       const absent = opts.absentRole === undefined || !roles.includes(opts.absentRole);
       const runtimeAbsent = !opts.noRuntime || !roles.some((role) => role === 'server' || /^client-\d+$/.test(role));
       if (hasServer && hasClients && absent && runtimeAbsent) {
@@ -840,7 +854,11 @@ export class RobloxStudioTools {
       }
       await sleep(250);
     }
-    return { ok: false, roles: this._rolesForInstance(instanceId), timedOut: true };
+    return {
+      ok: false,
+      roles: equivalentInstances ? this._rolesForEquivalentInstances(instanceId) : this._rolesForInstance(instanceId),
+      timedOut: true,
+    };
   }
 
   private async _waitForExactClientCount(
@@ -879,10 +897,12 @@ export class RobloxStudioTools {
     connectedAfter: number,
     requiredRoles: string[],
     timeoutSec = 60,
+    equivalentInstances = false,
   ): Promise<{ ok: boolean; roles: string[]; timedOut: boolean }> {
     const deadline = Date.now() + timeoutSec * 1000;
     while (Date.now() < deadline) {
-      const instances = this.bridge.getInstances().filter((i) => i.instanceId === instanceId);
+      const instanceIds = equivalentInstances ? new Set(this.bridge.getEquivalentInstanceIds(instanceId)) : new Set([instanceId]);
+      const instances = this.bridge.getInstances().filter((i) => instanceIds.has(i.instanceId));
       const roles = instances.map((i) => i.role);
       const freshRoles = new Set(
         instances
@@ -894,7 +914,11 @@ export class RobloxStudioTools {
       }
       await sleep(250);
     }
-    return { ok: false, roles: this._rolesForInstance(instanceId), timedOut: true };
+    return {
+      ok: false,
+      roles: equivalentInstances ? this._rolesForEquivalentInstances(instanceId) : this._rolesForInstance(instanceId),
+      timedOut: true,
+    };
   }
 
 
@@ -2185,7 +2209,7 @@ export class RobloxStudioTools {
     let wait: { ok: boolean; roles: string[]; timedOut: boolean } | undefined;
     if (response?.success === true) {
       const requiredRoles = mode === 'play' ? ['server', 'client-1'] : ['server'];
-      wait = await this._waitForRuntimeRolesFresh(resolved.targetInstanceId, startedAt, requiredRoles);
+      wait = await this._waitForRuntimeRolesFresh(resolved.targetInstanceId, startedAt, requiredRoles, 60, true);
     }
     const body = wait
       ? {
@@ -2215,7 +2239,7 @@ export class RobloxStudioTools {
     const response = await this.client.request('/api/stop-playtest', {}, instanceId, 'edit');
     let wait: { ok: boolean; roles: string[]; timedOut: boolean } | undefined;
     if (response?.success === true) {
-      wait = await this._waitForRuntimeRoles(instanceId, { noRuntime: true }, 15);
+      wait = await this._waitForRuntimeRoles(instanceId, { noRuntime: true }, 15, true);
     }
     const body = wait
       ? {
