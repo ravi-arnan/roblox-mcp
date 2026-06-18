@@ -112,6 +112,43 @@ describe('Smoke', () => {
     await expect(tools.startPlaytest('play', 1)).rejects.toThrow(/multiplayer_test_start/);
   });
 
+  test('start_playtest reports already running when runtime peers are connected', async () => {
+    const bridge = new BridgeService();
+    const tools = new RobloxStudioTools(bridge);
+    bridge.registerInstance(READY);
+    bridge.registerInstance({
+      pluginSessionId: 'server-1',
+      instanceId: 'place:test',
+      role: 'server',
+      placeId: 0,
+      placeName: 'TestPlace',
+      dataModelName: 'Game',
+      isRunning: true,
+    });
+    bridge.registerInstance({
+      pluginSessionId: 'client-1',
+      instanceId: 'place:test',
+      role: 'client',
+      placeId: 0,
+      placeName: 'TestPlace',
+      dataModelName: 'Game',
+      isRunning: true,
+    });
+
+    const result = await tools.startPlaytest('play', undefined, 'place:test');
+    expect(bridge.getPendingRequest('place:test', 'edit')).toBeNull();
+    const body = JSON.parse(result.content[0].text);
+    expect(body).toMatchObject({
+      success: false,
+      error: 'Playtest already running.',
+      message: 'A playtest is already running for this Studio place. Stop the current playtest before starting another.',
+      runtimeReady: true,
+      timedOut: false,
+      roles: ['edit', 'server', 'client-1'],
+      runtimeRoles: ['server', 'client-1'],
+    });
+  });
+
   test('start_playtest play mode waits for fresh server and client peers', async () => {
     const bridge = new BridgeService();
     const tools = new RobloxStudioTools(bridge);
@@ -827,22 +864,27 @@ describe('Smoke', () => {
     const result = await resultPromise;
     const body = JSON.parse(result.content[0].text);
     expect(body).toMatchObject({
+      success: true,
       target: 'edit-and-clients',
       network: true,
       deviceSimulator: true,
       roles: {
         edit: {
-          network: { after: ZERO_NETWORK_STATE },
-          deviceSimulator: { applied: { stopSimulation: true }, after: { activeDeviceId: 'default', isSimulating: false } },
+          network: true,
+          deviceSimulator: true,
         },
         'client-1': {
-          network: { after: ZERO_NETWORK_STATE },
-          deviceSimulator: { applied: { stopSimulation: true }, after: { activeDeviceId: 'default', isSimulating: false } },
+          network: true,
+          deviceSimulator: true,
         },
       },
       warnings: [],
     });
     expect(body.roles.server).toBeUndefined();
+    expect(JSON.stringify(body)).not.toContain('"before"');
+    expect(JSON.stringify(body)).not.toContain('"after"');
+    expect(JSON.stringify(body)).not.toContain('"applied"');
+    expect(body.persistenceNotes).toBeUndefined();
   });
 
   test('reset_simulation_state rejects the tool call when any reset operation fails', async () => {
@@ -866,6 +908,7 @@ describe('Smoke', () => {
     const result = await tools.resetSimulationState('all-clients', true, false, 'place:test');
     const body = JSON.parse(result.content[0].text);
     expect(body).toMatchObject({
+      success: true,
       target: 'all-clients',
       network: true,
       deviceSimulator: false,

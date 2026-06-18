@@ -639,6 +639,14 @@ export class RobloxStudioTools {
       .map((i) => ({ instanceId: i.instanceId, role: i.role }));
   }
 
+  private _compactSimulationResetResult(result: Record<string, unknown>): Record<string, unknown> {
+    const compact: Record<string, unknown> = {};
+    if ('network' in result) compact.network = true;
+    if ('deviceSimulator' in result) compact.deviceSimulator = true;
+    if (result.errors !== undefined) compact.errors = result.errors;
+    return compact;
+  }
+
   private _resolveDeviceSimulatorSingleTarget(
     target: string | undefined,
     instance_id: string | undefined,
@@ -1756,10 +1764,12 @@ export class RobloxStudioTools {
       return { role, result };
     }));
 
+    const rawRoles: Record<string, unknown> = {};
     const roles: Record<string, unknown> = {};
     const failures: string[] = [];
     for (const entry of roleEntries) {
-      roles[entry.role] = entry.result;
+      rawRoles[entry.role] = entry.result;
+      roles[entry.role] = this._compactSimulationResetResult(entry.result);
       const errors = (entry.result as { errors?: Record<string, string> }).errors;
       if (errors) {
         for (const [kind, message] of Object.entries(errors)) {
@@ -1769,16 +1779,16 @@ export class RobloxStudioTools {
     }
 
     const body = {
+      success: true,
       target: resolved.selectedTarget,
       network: resetNetwork,
       deviceSimulator: resetDeviceSimulator,
       roles,
       warnings: resolved.warnings,
-      persistenceNotes: SIMULATION_PERSISTENCE_NOTES,
     };
 
     if (failures.length > 0) {
-      throw new Error(`reset_simulation_state failed for ${failures.join('; ')}. Partial result: ${JSON.stringify(body)}`);
+      throw new Error(`reset_simulation_state failed for ${failures.join('; ')}. Partial result: ${JSON.stringify({ ...body, roles: rawRoles })}`);
     }
 
     return {
@@ -2206,6 +2216,24 @@ export class RobloxStudioTools {
           count: this.bridge.getInstances().length,
         },
       });
+    }
+    const existingRuntime = this._runtimeTargetsForEquivalentInstances(resolved.targetInstanceId);
+    if (existingRuntime.length > 0) {
+      const roles = this._rolesForEquivalentInstances(resolved.targetInstanceId);
+      return {
+        content: [{
+          type: 'text',
+          text: JSON.stringify({
+            success: false,
+            error: 'Playtest already running.',
+            message: 'A playtest is already running for this Studio place. Stop the current playtest before starting another.',
+            runtimeReady: true,
+            timedOut: false,
+            roles,
+            runtimeRoles: existingRuntime.map((target) => target.role),
+          }),
+        }],
+      };
     }
     const response = await this.client.request(
       '/api/start-playtest',
