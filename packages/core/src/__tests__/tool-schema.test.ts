@@ -148,6 +148,7 @@ describe('Tool schema compatibility', () => {
       multiplayer_test_leave_client: 'multiplayerTestLeaveClient',
       multiplayer_test_end: 'multiplayerTestEnd',
       get_runtime_logs: 'getRuntimeLogs',
+      breakpoints: 'breakpoints',
       export_build: 'exportBuild',
       import_build: 'importBuild',
       search_materials: 'searchMaterials',
@@ -204,6 +205,38 @@ describe('Tool schema compatibility', () => {
       'animation_memory',
       'audio_memory',
     ]);
+  });
+
+  test('breakpoints schema exposes lifecycle actions and log fields', () => {
+    const tool = TOOL_DEFINITIONS.find((t) => t.name === 'breakpoints');
+    expect(tool).toBeTruthy();
+    const schema = tool!.inputSchema as { properties?: Record<string, unknown>; required?: string[] };
+    const props = schema.properties ?? {};
+    expect(Object.keys(props).sort()).toEqual([
+      'action',
+      'clear_all',
+      'condition',
+      'continue_execution',
+      'enabled',
+      'instance_id',
+      'line',
+      'log_message',
+      'script_path',
+      'target',
+    ].sort());
+    expect((props.action as { enum?: string[] }).enum).toEqual(['set', 'remove', 'clear', 'list']);
+    expect(schema.required).toEqual(['action']);
+    expect(tool!.description).toContain('filtered by "Breakpoint"');
+    expect(tool!.description).toContain('breakpoint-related failures');
+    expect(tool!.description).toContain('ScriptDebuggerService.OnStopped handler');
+    expect(tool!.description).toContain('Minimal OnStopped reference');
+    expect(tool!.description).toContain('sds.OnStopped=function(info)');
+    expect(tool!.description).toContain('Minimal flow');
+    expect(tool!.description).toContain('clear_all=true');
+    expect(tool!.description).toContain('MCP-managed breakpoints persist minimal script_path/line recovery data per place and target');
+    expect(tool!.description).toContain('tool-created edit/server/client breakpoints');
+    expect((props.clear_all as { description?: string }).description).toContain('MCP-managed breakpoints');
+    expect((props.continue_execution as { description?: string }).description).toContain('Enum.DebuggerResumeType.Resume');
   });
 
   test('device simulator schemas expose target routing and matrix entries', () => {

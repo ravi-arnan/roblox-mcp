@@ -57,21 +57,47 @@ function dropOldestUntilFits(incomingBytes: number): void {
 	}
 }
 
+function pushEntry(msg: string, t: Enum.MessageType, ts = nowSec()): void {
+	const bytes = msg.size();
+	dropOldestUntilFits(bytes);
+	entries.push({
+		seq: nextSeq,
+		ts,
+		level: levelTag(t),
+		message: msg,
+	});
+	nextSeq += 1;
+	totalBytes += bytes;
+}
+
+interface LogHistoryEntry {
+	message: string;
+	messageType: Enum.MessageType;
+	timestamp: number;
+}
+
+function seedRuntimeHistory(): void {
+	if (!RunService.IsRunning()) return;
+
+	const [ok, history] = pcall(() => LogService.GetLogHistory() as LogHistoryEntry[]);
+	if (!ok) return;
+
+	for (const entry of history) {
+		if (!typeIs(entry.message, "string")) continue;
+		pushEntry(entry.message, entry.messageType, typeIs(entry.timestamp, "number") ? entry.timestamp : undefined);
+	}
+}
+
 function install(): void {
 	if (installed) return;
 	if (!RunService.IsStudio()) return;
 	installed = true;
+	// Play peers can emit startup logs before the plugin finishes loading.
+	// Seed from per-DataModel LogHistory so get_runtime_logs can still see
+	// those early messages; skip edit mode to avoid stale prior-session logs.
+	seedRuntimeHistory();
 	LogService.MessageOut.Connect((msg, t) => {
-		const bytes = msg.size();
-		dropOldestUntilFits(bytes);
-		entries.push({
-			seq: nextSeq,
-			ts: nowSec(),
-			level: levelTag(t),
-			message: msg,
-		});
-		nextSeq += 1;
-		totalBytes += bytes;
+		pushEntry(msg, t);
 	});
 }
 

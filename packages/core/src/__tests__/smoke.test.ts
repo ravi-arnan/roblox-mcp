@@ -112,6 +112,45 @@ describe('Smoke', () => {
     await expect(tools.startPlaytest('play', 1)).rejects.toThrow(/multiplayer_test_start/);
   });
 
+  test('breakpoints decorates response with resolved target role', async () => {
+    const bridge = new BridgeService();
+    const tools = new RobloxStudioTools(bridge);
+    bridge.registerInstance(READY);
+    bridge.registerInstance({
+      pluginSessionId: 'server-1',
+      instanceId: 'place:test',
+      role: 'server',
+      placeId: 0,
+      placeName: 'TestPlace',
+      dataModelName: 'Game',
+      isRunning: true,
+    });
+
+    const resultPromise = tools.breakpoints('set', {
+      script_path: 'game.ServerScriptService.Main',
+      line: 12,
+      log_message: '"probe"',
+    }, 'server', 'place:test');
+
+    const pending = bridge.getPendingRequest('place:test', 'server');
+    expect(pending?.request).toMatchObject({
+      endpoint: '/api/breakpoints',
+      data: {
+        action: 'set',
+        script_path: 'game.ServerScriptService.Main',
+        line: 12,
+        log_message: '"probe"',
+        __mcp_instance_id: 'place:test',
+        __mcp_target_role: 'server',
+      },
+    });
+    bridge.resolveRequest(pending!.requestId, { ok: true, breakpoint: { line: 12 } });
+
+    const result = await resultPromise;
+    const body = JSON.parse(result.content[0].text);
+    expect(body).toEqual({ target: 'server', ok: true, breakpoint: { line: 12 } });
+  });
+
   test('start_playtest reports already running when runtime peers are connected', async () => {
     const bridge = new BridgeService();
     const tools = new RobloxStudioTools(bridge);

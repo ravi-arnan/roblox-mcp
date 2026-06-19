@@ -17,6 +17,7 @@ import LogHandlers from "./handlers/LogHandlers";
 import SerializationHandlers from "./handlers/SerializationHandlers";
 import MemoryHandlers from "./handlers/MemoryHandlers";
 import SceneAnalysisHandlers from "./handlers/SceneAnalysisHandlers";
+import BreakpointHandlers from "./handlers/BreakpointHandlers";
 import EvalRuntimeHandlers from "./handlers/EvalRuntimeHandlers";
 import ClientBroker from "./ClientBroker";
 import ServerUrlSettings from "./ServerUrlSettings";
@@ -171,6 +172,7 @@ const routeMap: Record<string, Handler> = {
 	"/api/find-and-replace-in-scripts": ScriptHandlers.findAndReplaceInScripts,
 
 	"/api/get-runtime-logs": LogHandlers.getRuntimeLogs,
+	"/api/breakpoints": BreakpointHandlers.breakpoints,
 
 	"/api/export-rbxm": SerializationHandlers.exportRbxm,
 	"/api/import-rbxm": SerializationHandlers.importRbxm,

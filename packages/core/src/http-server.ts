@@ -83,6 +83,7 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
   multiplayer_test_leave_client: (tools, body) => tools.multiplayerTestLeaveClient(body.target, body.timeout, body.instance_id),
   multiplayer_test_end: (tools, body) => tools.multiplayerTestEnd(body.value, body.timeout, body.instance_id),
   get_runtime_logs: (tools, body) => tools.getRuntimeLogs(body.target, body.since, body.tail, body.filter, body.instance_id),
+  breakpoints: (tools, body) => tools.breakpoints(body.action, body, body.target, body.instance_id),
   get_connected_instances: (tools) => tools.getConnectedInstances(),
   export_build: (tools, body) => tools.exportBuild(body.instancePath, body.outputId, body.style, body.instance_id),
   create_build: (tools, body) => tools.createBuild(body.id, body.style, body.palette, body.parts, body.bounds),

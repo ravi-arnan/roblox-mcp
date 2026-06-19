@@ -5,6 +5,7 @@ import SceneAnalysisHandlers from "./handlers/SceneAnalysisHandlers";
 import CaptureHandlers from "./handlers/CaptureHandlers";
 import InputHandlers from "./handlers/InputHandlers";
 import EvalRuntimeHandlers from "./handlers/EvalRuntimeHandlers";
+import BreakpointHandlers from "./handlers/BreakpointHandlers";
 import LuauExec from "./LuauExec";
 import State from "./State";
 import HttpDiagnostics from "./HttpDiagnostics";
@@ -94,6 +95,7 @@ const CLIENT_BROKER_ALLOWED_ENDPOINTS = new Set<string>([
 	"/api/get-runtime-logs",
 	"/api/get-memory-breakdown",
 	"/api/get-scene-analysis",
+	"/api/breakpoints",
 	"/api/multiplayer-test-state",
 	"/api/multiplayer-test-leave-client",
 	// Screenshot capture must run in the client peer (CaptureService captures
@@ -265,6 +267,9 @@ function setupClientBroker() {
 		}
 		if (payload && payload.endpoint === "/api/get-scene-analysis") {
 			return SceneAnalysisHandlers.getSceneAnalysis(payload.data ?? {});
+		}
+		if (payload && payload.endpoint === "/api/breakpoints") {
+			return BreakpointHandlers.breakpoints(payload.data ?? {});
 		}
 		if (payload && payload.endpoint === "/api/multiplayer-test-state") {
 			return handleMultiplayerTestState();

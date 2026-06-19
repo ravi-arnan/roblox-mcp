@@ -2196,6 +2196,35 @@ export class RobloxStudioTools {
     };
   }
 
+  async breakpoints(action: string, request: Record<string, unknown> = {}, target?: string, instance_id?: string) {
+    if (!action || typeof action !== 'string') {
+      throw new Error('breakpoints requires action=set|remove|clear|list');
+    }
+    const targetRole = target ?? 'edit';
+    const data: Record<string, unknown> = { ...request, action };
+    delete data.target;
+    delete data.instance_id;
+    const resolved = this.bridge.resolveTarget({ instance_id, target: targetRole });
+    if (!resolved.ok) throw new RoutingFailure(resolved.error);
+    if (resolved.mode !== 'single') {
+      throw new RoutingFailure({
+        code: 'target_role_not_present_on_instance',
+        message: 'This tool does not support target=all. Pick a specific role or omit target.',
+        data: {
+          instances: this.bridge.getPublicInstances(),
+          count: this.bridge.getInstances().length,
+        },
+      });
+    }
+    data.__mcp_instance_id = resolved.targetInstanceId;
+    data.__mcp_target_role = resolved.targetRole;
+    const response = await this.client.request('/api/breakpoints', data, resolved.targetInstanceId, resolved.targetRole);
+    const body = response !== null && typeof response === 'object' && !Array.isArray(response)
+      ? { ...response, target: resolved.targetRole }
+      : response;
+    return { content: [{ type: 'text', text: JSON.stringify(body) }] };
+  }
+
   async startPlaytest(mode: string, numPlayers?: number, instance_id?: string) {
     if (mode !== 'play' && mode !== 'run') {
       throw new Error('mode must be "play" or "run"');
