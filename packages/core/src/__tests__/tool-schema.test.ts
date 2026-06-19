@@ -141,13 +141,13 @@ describe('Tool schema compatibility', () => {
       capture_device_matrix: 'captureDeviceMatrix',
       start_playtest: 'startPlaytest',
       stop_playtest: 'stopPlaytest',
-      get_playtest_output: 'getPlaytestOutput',
       multiplayer_test_start: 'multiplayerTestStart',
       multiplayer_test_state: 'multiplayerTestState',
       multiplayer_test_add_players: 'multiplayerTestAddPlayers',
       multiplayer_test_leave_client: 'multiplayerTestLeaveClient',
       multiplayer_test_end: 'multiplayerTestEnd',
       get_runtime_logs: 'getRuntimeLogs',
+      capture_script_profiler: 'captureScriptProfiler',
       breakpoints: 'breakpoints',
       export_build: 'exportBuild',
       import_build: 'importBuild',
@@ -160,7 +160,6 @@ describe('Tool schema compatibility', () => {
       clone_object: 'cloneObject',
       get_descendants: 'getDescendants',
       compare_instances: 'compareInstances',
-      get_output_log: 'getOutputLog',
       bulk_set_attributes: 'bulkSetAttributes',
       capture_screenshot: 'captureScreenshot',
       simulate_mouse_input: 'simulateMouseInput',
@@ -237,6 +236,52 @@ describe('Tool schema compatibility', () => {
     expect(tool!.description).toContain('tool-created edit/server/client breakpoints');
     expect((props.clear_all as { description?: string }).description).toContain('MCP-managed breakpoints');
     expect((props.continue_execution as { description?: string }).description).toContain('Enum.DebuggerResumeType.Resume');
+  });
+
+  test('capture_script_profiler schema exposes focused optimization primitive', () => {
+    const tool = TOOL_DEFINITIONS.find((t) => t.name === 'capture_script_profiler');
+    expect(tool).toBeTruthy();
+    const schema = tool!.inputSchema as { properties?: Record<string, unknown> };
+    const props = schema.properties ?? {};
+    expect(Object.keys(props).sort()).toEqual([
+      'duration_ms',
+      'filter',
+      'frequency',
+      'include_native',
+      'include_plugin',
+      'instance_id',
+      'max_functions',
+      'min_total_us',
+      'output_path',
+      'target',
+    ].sort());
+    expect(tool!.category).toBe('read');
+    expect(tool!.description).toContain('Minimal flow');
+    expect(tool!.description).toContain('debug.profilebegin');
+    expect(tool!.description).toContain('microseconds');
+    expect(tool!.description).toContain('total_us');
+    expect(tool!.description).toContain('function_index');
+    expect(tool!.description).toContain('do not sum rows');
+    expect(tool!.description).toContain('runtime script path');
+    expect(tool!.description).toContain('applied');
+    expect(tool!.description).toContain('omitted.filtered_out');
+    expect(tool!.description).toContain('does not expose long-lived profiler sessions');
+    expect((props.target as { description?: string }).description).toContain('server');
+    expect((props.target as { description?: string }).description).toContain('client-N');
+    expect((props.target as { pattern?: string }).pattern).toBe('^(server|client-[0-9]+)$');
+    expect((props.duration_ms as { default?: number; minimum?: number; maximum?: number }).default).toBe(1000);
+    expect((props.duration_ms as { default?: number; minimum?: number; maximum?: number }).minimum).toBe(100);
+    expect((props.duration_ms as { default?: number; minimum?: number; maximum?: number }).maximum).toBe(15000);
+    expect((props.frequency as { default?: number; minimum?: number; maximum?: number }).default).toBe(1000);
+    expect((props.frequency as { default?: number; minimum?: number; maximum?: number }).minimum).toBe(1);
+    expect((props.frequency as { default?: number; minimum?: number; maximum?: number }).maximum).toBe(10000);
+    expect((props.max_functions as { default?: number; minimum?: number; maximum?: number }).default).toBe(20);
+    expect((props.max_functions as { default?: number; minimum?: number; maximum?: number }).minimum).toBe(1);
+    expect((props.max_functions as { default?: number; minimum?: number; maximum?: number }).maximum).toBe(100);
+    expect((props.min_total_us as { default?: number; minimum?: number }).default).toBe(0);
+    expect((props.min_total_us as { default?: number; minimum?: number }).minimum).toBe(0);
+    expect((props.min_total_us as { description?: string }).description).toContain('microseconds');
+    expect((props.output_path as { description?: string }).description).toContain('raw Script Profiler JSON');
   });
 
   test('device simulator schemas expose target routing and matrix entries', () => {

@@ -986,7 +986,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: 'start_playtest',
     category: 'write',
-    description: 'Start a simple single-player Studio playtest in play or run mode, waiting until a runtime peer registers with MCP. Captures print/warn/error via LogService. Poll with get_playtest_output, end with stop_playtest. For multi-client testing use multiplayer_test_start instead.',
+    description: 'Start a simple single-player Studio playtest in play or run mode, waiting until a runtime peer registers with MCP. Read print/warn/error output with get_runtime_logs, then end with stop_playtest. For multi-client testing use multiplayer_test_start instead.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1010,28 +1010,10 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: 'stop_playtest',
     category: 'write',
-    description: 'Stop playtest and return all captured output.',
+    description: 'Stop playtest and wait for runtime peers to disconnect.',
     inputSchema: {
       type: 'object',
       properties: {
-        instance_id: {
-          type: 'string',
-          description: 'Which connected Studio place to target. Required when multiple places are connected; omit when one. Use get_connected_instances to list available IDs.'
-        }
-      }
-    }
-  },
-  {
-    name: 'get_playtest_output',
-    category: 'read',
-    description: 'Poll output buffer without stopping. Returns isRunning and captured messages.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        target: {
-          type: 'string',
-          description: 'Instance target: "edit" (default), "server", "client-1", "client-2", etc.'
-        },
         instance_id: {
           type: 'string',
           description: 'Which connected Studio place to target. Required when multiple places are connected; omit when one. Use get_connected_instances to list available IDs.'
@@ -1441,6 +1423,68 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         filter: {
           type: 'string',
           description: 'Plain substring matched against each entry\'s message (no pattern semantics; literal text). Applied after since, before tail.'
+        },
+        instance_id: {
+          type: 'string',
+          description: 'Which connected Studio place to target. Required when multiple places are connected; omit when one. Use get_connected_instances to list available IDs.'
+        }
+      }
+    }
+  },
+  {
+    name: 'capture_script_profiler',
+    category: 'read',
+    description: 'Capture one short ScriptProfilerService sample on a running server or client peer and return a compact CPU summary. Use this for Luau/script optimization, not render, physics, networking, or engine microprofiler lanes. Minimal flow: start or reproduce the workload, call capture_script_profiler with target="server" or a specific "client-N", inspect top_functions, patch the suspected hot path, then capture again with the same target/workload/duration_ms/frequency/filter/min_total_us to compare. top_functions is sorted by descending total_us after native/plugin/min/filter exclusions; each row includes rank plus function_index, the 1-based index into the raw Roblox Functions array. Function and node TotalDuration values follow Roblox\'s exported Script Profiler JSON format and are reported in microseconds as total_us. total_us is cumulative profiler TotalDuration during the capture; nested labels/functions can overlap, so do not sum rows as total CPU time. source is the runtime script path reported by Roblox and may need mapping back to editable source with search tools. If function names are too broad, add debug.profilebegin("Area:SpecificStep") / debug.profileend() around suspected code and pass filter="Area:" or another label prefix; matching custom labels appear in debug_labels and top_functions with their script source and no line number. The result echoes effective options in applied and omitted.filtered_out counts rows removed by filter. Keep captures short while actively triggering the behavior; duration_ms defaults to 1000 and is clamped to 100-15000. Pass output_path when you need the raw Roblox Script Profiler JSON for offline comparison or deeper analysis. This tool owns the start/stop/request profiler lifecycle for one capture and does not expose long-lived profiler sessions.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        target: {
+          type: 'string',
+          pattern: '^(server|client-[0-9]+)$',
+          description: 'Runtime peer to profile: "server" (default) or "client-N". Use get_connected_instances to discover available runtime roles. target="edit" is invalid because ScriptProfiler captures running code.'
+        },
+        duration_ms: {
+          type: 'number',
+          default: 1000,
+          minimum: 100,
+          maximum: 15000,
+          description: 'Sample duration in milliseconds. Defaults to 1000; clamped to 100-15000 so the Studio bridge does not hang on long captures.'
+        },
+        frequency: {
+          type: 'number',
+          default: 1000,
+          minimum: 1,
+          maximum: 10000,
+          description: 'ScriptProfiler sampling frequency in samples per second (Hz). Defaults to 1000.'
+        },
+        max_functions: {
+          type: 'number',
+          default: 20,
+          minimum: 1,
+          maximum: 100,
+          description: 'Maximum number of top_functions and debug_labels to return. Defaults to 20; clamped to 1-100.'
+        },
+        min_total_us: {
+          type: 'number',
+          default: 0,
+          minimum: 0,
+          description: 'Omit functions below this TotalDuration in microseconds after capture. Defaults to 0.'
+        },
+        filter: {
+          type: 'string',
+          description: 'Optional case-insensitive substring matched against function name and source before top_functions are returned. Useful for focusing on one module or debug.profilebegin label prefix.'
+        },
+        include_native: {
+          type: 'boolean',
+          description: 'Include native Roblox frames in top_functions. Defaults to false to keep optimization output focused on game Luau and debug labels.'
+        },
+        include_plugin: {
+          type: 'boolean',
+          description: 'Include plugin frames in top_functions. Defaults to false because the MCP capture implementation can otherwise add noise.'
+        },
+        output_path: {
+          type: 'string',
+          description: 'Optional local path where the MCP server writes the raw Script Profiler JSON. The tool result then includes output_path instead of inlining the raw JSON.'
         },
         instance_id: {
           type: 'string',
@@ -2224,30 +2268,6 @@ part(0,2,0,2,1,1,"b")`,
         }
       },
       required: ['instancePathA', 'instancePathB']
-    }
-  },
-
-  // === Output & Diagnostics ===
-  {
-    name: 'get_output_log',
-    category: 'read',
-    description: 'Get the Studio output log history. Works in both edit and play mode.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        maxEntries: {
-          type: 'number',
-          description: 'Maximum number of log entries to return (default: 100)'
-        },
-        messageType: {
-          type: 'string',
-          description: 'Filter by message type (e.g. "Enum.MessageType.MessageOutput", "Enum.MessageType.MessageWarning", "Enum.MessageType.MessageError")'
-        },
-        instance_id: {
-          type: 'string',
-          description: 'Which connected Studio place to target. Required when multiple places are connected; omit when one. Use get_connected_instances to list available IDs.'
-        }
-      }
     }
   },
   // === Bulk Attributes ===
