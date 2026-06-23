@@ -10,14 +10,16 @@ Use this when you want your agent to debug and operate a live Roblox Studio sess
 
 - `edit`, `server`, and `client-N` targeting for live playtests.
 - Game-VM eval on the server or a specific client, sharing the same `require` cache as your scripts.
+- Studio log breakpoints that let agents instrument live code without stopping the playtest.
+- Script Profiler captures for server/client CPU hotspots, debug labels, and microsecond timing summaries.
 - Explicit StudioTestService multiplayer runs: start, add/remove clients, inspect state, and end.
 - Runtime log capture buffers, plus Stats memory and Scene Analysis attribution per peer.
-- Viewport screenshots plus virtual mouse, keyboard, character navigation, and UI interaction.
+- Viewport screenshots plus virtual mouse, keyboard, and UI interaction.
 - Bulk property/script/attribute/tag operations for large places.
 - `.rbxm` import/export through `SerializationService`.
 - A read-only inspector package for safer review/debugging sessions.
 
-75 tools total, including file tree inspection, mass reads/writes, script search-and-replace, asset insertion, build import/export, screenshot capture, runtime eval, memory tools, Scene Analysis, and playtest control.
+81 tools total, including file tree inspection, mass reads/writes, script search-and-replace, asset insertion, build import/export, screenshot capture, log breakpoints, Script Profiler captures, runtime eval, memory tools, Scene Analysis, and playtest control.
 
 ## Setup
 
@@ -76,6 +78,8 @@ On Windows, wrap with `cmd /c` if `npx` doesn't resolve:
 > *"Find scripts using deprecated APIs and rewrite them."*
 > *"Start a multiplayer test with 2 clients, read the server log, and tell me why the round never starts."*
 > *"Evaluate `MatchService.activeMatches` on the server while a match is running."*
+> *"Set a log breakpoint on the damage function, reproduce the hit, then read the breakpoint logs."*
+> *"Capture a server Script Profiler sample while the wave spawns and rank the hottest functions."*
 > *"Spawn 50 NPCs in a 10x5 grid for stress testing."*
 
 ## Inspector edition (read-only)
@@ -98,7 +102,7 @@ gemini mcp add robloxstudio-inspector npx --trust -- -y @chrrxs/robloxstudio-mcp
 ---
 
 <!-- VERSION_LINE -->
-**v2.17.0**
+**v2.17.1**
 
 ## Building from source
 

@@ -43,7 +43,6 @@ const ROUTED_TOOLS = new Set([
   'capture_screenshot',
   'simulate_mouse_input',
   'simulate_keyboard_input',
-  'character_navigation',
 ]);
 
 export class McpClient {

@@ -18,7 +18,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
       properties: {
         path: {
           type: 'string',
-          description: 'Root path (default: game root)'
+          description: 'Canonical DataModel path (default: game root), such as game.Workspace or game.ServerScriptService[".dir"]'
         },
         instance_id: {
           type: 'string',
@@ -124,7 +124,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
       properties: {
         instancePath: {
           type: 'string',
-          description: 'Instance path (dot notation)'
+          description: 'Canonical DataModel path, such as game.Workspace.Part or game.ServerScriptService[".dir"].Main'
         },
         excludeSource: {
           type: 'boolean',
@@ -147,7 +147,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
       properties: {
         instancePath: {
           type: 'string',
-          description: 'Instance path (dot notation)'
+          description: 'Canonical DataModel path, such as game.Workspace.Part or game.ServerScriptService[".dir"].Main'
         },
         instance_id: {
           type: 'string',
@@ -210,7 +210,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
       properties: {
         path: {
           type: 'string',
-          description: 'Root path (default: workspace root)'
+          description: 'Canonical DataModel path (default: workspace root)'
         },
         maxDepth: {
           type: 'number',
@@ -238,7 +238,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
       properties: {
         instancePath: {
           type: 'string',
-          description: 'Instance path (dot notation)'
+          description: 'Canonical DataModel path'
         },
         propertyName: {
           type: 'string',
@@ -265,7 +265,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         paths: {
           type: 'array',
           items: { type: 'string' },
-          description: 'Instance paths'
+          description: 'Canonical DataModel paths'
         },
         propertyName: {
           type: 'string',
@@ -292,7 +292,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         paths: {
           type: 'array',
           items: { type: 'string' },
-          description: 'Instance paths'
+          description: 'Canonical DataModel paths'
         },
         propertyName: {
           type: 'string',
@@ -315,7 +315,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
       properties: {
         instancePath: {
           type: 'string',
-          description: 'Instance path'
+          description: 'Canonical DataModel path'
         },
         properties: {
           type: 'object',
@@ -344,7 +344,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         },
         parent: {
           type: 'string',
-          description: 'Parent instance path'
+          description: 'Canonical parent DataModel path'
         },
         name: {
           type: 'string',
@@ -380,7 +380,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
               },
               parent: {
                 type: 'string',
-                description: 'Parent instance path'
+                description: 'Canonical parent DataModel path'
               },
               name: {
                 type: 'string',
@@ -412,7 +412,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
       properties: {
         instancePath: {
           type: 'string',
-          description: 'Instance path (dot notation)'
+          description: 'Canonical DataModel path'
         },
         instance_id: {
           type: 'string',
@@ -433,7 +433,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
       properties: {
         instancePath: {
           type: 'string',
-          description: 'Instance path (dot notation)'
+          description: 'Canonical DataModel path'
         },
         count: {
           type: 'number',
@@ -494,7 +494,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
             properties: {
               instancePath: {
                 type: 'string',
-                description: 'Instance path (dot notation)'
+                description: 'Canonical DataModel path'
               },
               count: {
                 type: 'number',
@@ -558,7 +558,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
       properties: {
         instancePath: {
           type: 'string',
-          description: 'Script instance path'
+          description: 'Canonical path to a LuaSourceContainer'
         },
         startLine: {
           type: 'number',
@@ -585,7 +585,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
       properties: {
         instancePath: {
           type: 'string',
-          description: 'Script instance path'
+          description: 'Canonical path to a LuaSourceContainer'
         },
         source: {
           type: 'string',
@@ -608,7 +608,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
       properties: {
         instancePath: {
           type: 'string',
-          description: 'Script instance path'
+          description: 'Canonical path to a LuaSourceContainer'
         },
         old_string: {
           type: 'string',
@@ -639,7 +639,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
       properties: {
         instancePath: {
           type: 'string',
-          description: 'Script instance path'
+          description: 'Canonical path to a LuaSourceContainer'
         },
         afterLine: {
           type: 'number',
@@ -666,7 +666,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
       properties: {
         instancePath: {
           type: 'string',
-          description: 'Script instance path'
+          description: 'Canonical path to a LuaSourceContainer'
         },
         startLine: {
           type: 'number',
@@ -695,7 +695,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
       properties: {
         instancePath: {
           type: 'string',
-          description: 'Instance path (dot notation)'
+          description: 'Canonical DataModel path'
         },
         attributeName: {
           type: 'string',
@@ -725,7 +725,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
       properties: {
         instancePath: {
           type: 'string',
-          description: 'Instance path (dot notation)'
+          description: 'Canonical DataModel path'
         },
         instance_id: {
           type: 'string',
@@ -744,7 +744,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
       properties: {
         instancePath: {
           type: 'string',
-          description: 'Instance path (dot notation)'
+          description: 'Canonical DataModel path'
         },
         attributeName: {
           type: 'string',
@@ -769,7 +769,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
       properties: {
         instancePath: {
           type: 'string',
-          description: 'Instance path (dot notation)'
+          description: 'Canonical DataModel path'
         },
         instance_id: {
           type: 'string',
@@ -788,7 +788,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
       properties: {
         instancePath: {
           type: 'string',
-          description: 'Instance path (dot notation)'
+          description: 'Canonical DataModel path'
         },
         tagName: {
           type: 'string',
@@ -811,7 +811,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
       properties: {
         instancePath: {
           type: 'string',
-          description: 'Instance path (dot notation)'
+          description: 'Canonical DataModel path'
         },
         tagName: {
           type: 'string',
@@ -1511,7 +1511,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         },
         script_path: {
           type: 'string',
-          description: 'Path to a LuaSourceContainer, for example game.ServerScriptService.Main. Required for set/remove.'
+          description: 'Canonical path to a LuaSourceContainer, for example game.ServerScriptService.Main or game.ServerScriptService[".dir"].ReproScript. Required for set/remove.'
         },
         line: {
           type: 'number',
@@ -1597,7 +1597,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
       properties: {
         instancePath: {
           type: 'string',
-          description: 'Path to the Model or Folder to export (dot notation)'
+          description: 'Canonical path to the Model or Folder to export'
         },
         outputId: {
           type: 'string',
@@ -1754,7 +1754,7 @@ part(0,2,0,2,1,1,"b")`,
         },
         targetPath: {
           type: 'string',
-          description: 'Parent instance path where the model will be created'
+          description: 'Canonical parent DataModel path where the model will be created'
         },
         position: {
           type: 'array',
@@ -1885,7 +1885,7 @@ part(0,2,0,2,1,1,"b")`,
         },
         targetPath: {
           type: 'string',
-          description: 'Parent instance path for the scene (default: game.Workspace)'
+          description: 'Canonical parent DataModel path for the scene (default: game.Workspace)'
         },
         instance_id: {
           type: 'string',
@@ -1978,7 +1978,7 @@ part(0,2,0,2,1,1,"b")`,
         },
         parentPath: {
           type: 'string',
-          description: 'Parent instance path (default: game.Workspace)'
+          description: 'Canonical parent DataModel path (default: game.Workspace)'
         },
         position: {
           type: 'object',
@@ -2158,43 +2158,6 @@ part(0,2,0,2,1,1,"b")`,
     }
   },
 
-  // === Character Navigation ===
-  {
-    name: 'character_navigation',
-    category: 'write',
-    description: 'Move the player character to a target position or instance during playtest. Uses PathfindingService for automatic navigation around obstacles, falling back to direct movement. Requires an active playtest in "play" mode. Does NOT simulate player input - moves the character directly.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        position: {
-          type: 'array',
-          items: { type: 'number' },
-          description: 'Target world position [x, y, z]. Either this or instancePath is required.'
-        },
-        instancePath: {
-          type: 'string',
-          description: 'Instance to navigate to (dot notation). The character walks to its Position. Either this or position is required.'
-        },
-        waitForCompletion: {
-          type: 'boolean',
-          description: 'Wait for the character to arrive before returning (default: true)'
-        },
-        timeout: {
-          type: 'number',
-          description: 'Max seconds to wait for navigation to complete (default: 25)'
-        },
-        target: {
-          type: 'string',
-          description: 'Instance target: "edit" (default), "server", "client-1", "client-2", etc.'
-        },
-        instance_id: {
-          type: 'string',
-          description: 'Which connected Studio place to target. Required when multiple places are connected; omit when one. Use get_connected_instances to list available IDs.'
-        }
-      }
-    }
-  },
-
   // === Instance Operations ===
   {
     name: 'clone_object',
@@ -2205,11 +2168,11 @@ part(0,2,0,2,1,1,"b")`,
       properties: {
         instancePath: {
           type: 'string',
-          description: 'Path of the instance to clone'
+          description: 'Canonical path of the instance to clone'
         },
         targetParentPath: {
           type: 'string',
-          description: 'Path of the parent to place the clone under'
+          description: 'Canonical path of the parent to place the clone under'
         },
         instance_id: {
           type: 'string',
@@ -2229,7 +2192,7 @@ part(0,2,0,2,1,1,"b")`,
       properties: {
         instancePath: {
           type: 'string',
-          description: 'Root instance path'
+          description: 'Canonical root DataModel path'
         },
         maxDepth: {
           type: 'number',
@@ -2256,11 +2219,11 @@ part(0,2,0,2,1,1,"b")`,
       properties: {
         instancePathA: {
           type: 'string',
-          description: 'First instance path'
+          description: 'First canonical DataModel path'
         },
         instancePathB: {
           type: 'string',
-          description: 'Second instance path'
+          description: 'Second canonical DataModel path'
         },
         instance_id: {
           type: 'string',
@@ -2280,7 +2243,7 @@ part(0,2,0,2,1,1,"b")`,
       properties: {
         instancePath: {
           type: 'string',
-          description: 'Instance path'
+          description: 'Canonical DataModel path'
         },
         attributes: {
           type: 'object',
@@ -2364,7 +2327,7 @@ part(0,2,0,2,1,1,"b")`,
         instance_paths: {
           type: 'array',
           items: { type: 'string' },
-          description: 'DataModel paths to serialize (e.g. ["Workspace.TestRig", "ServerStorage.Templates.NPC"])'
+          description: 'Canonical DataModel paths to serialize (e.g. ["game.Workspace.TestRig", "game.ServerStorage.Templates.NPC"])'
         },
         output_path: {
           type: 'string',
@@ -2406,7 +2369,7 @@ part(0,2,0,2,1,1,"b")`,
         },
         parent_path: {
           type: 'string',
-          description: 'DataModel path of the Instance to parent imported instances under (e.g. "ServerStorage.Imported")'
+          description: 'Canonical DataModel path of the Instance to parent imported instances under (e.g. "game.ServerStorage.Imported")'
         },
         target: {
           type: 'string',

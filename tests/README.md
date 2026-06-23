@@ -41,7 +41,9 @@ normal main-plugin tool surface. It closes Studio, auto-installs the local main
 plugin into a backed-up plugin folder, opens a temporary `.rbxlx` place, verifies
 edit-mode read/write/script/tag/attribute/execute tools, then runs
 `tests/run-all.mjs` against the same primary server to cover playtest, runtime,
-proxy, and multiplayer paths. It restores the original plugin files afterward.
+and proxy paths. Multiplayer paths are temporarily skipped because of a known
+Roblox StudioTestService regression. It restores the original plugin files
+afterward.
 
 ```bash
 RSMCP_E2E_CLOSE_ALL_STUDIO=1 npm run test:studio:tools
@@ -78,17 +80,16 @@ node scripts/studio-lifecycle.mjs wait-connected --variant main --version <expec
 |---|---|
 | `eval-bridge-error-preservation.mjs` | `eval_server_runtime` / `eval_client_runtime` surface actual user errors instead of Roblox's generic `"Requested module experienced an error while loading"` wrapper for explicit errors, nil derefs, parser errors, and nested `require()` module-load failures |
 | `eval-context-routing.mjs` | `execute_luau target=server/client-N` runs in plugin context on the selected peer, while `eval_server_runtime` / `eval_client_runtime` run through the server Script and client LocalScript eval bridges |
-| `runtime-bridge-lifecycle.mjs` | Runtime eval bridges are created inside play DataModels, stay out of edit mode, work for managed and manually-started playtests, and direct multiplayer logs get peer attribution |
+| `runtime-bridge-lifecycle.mjs` | Runtime eval bridges are created inside play DataModels, stay out of edit mode, and work for managed and manually-started playtests; direct multiplayer coverage is temporarily skipped |
 | `execute-luau-error-preservation.mjs` | `execute_luau` surfaces user error messages, parser errors, and nested `require()` module-load failures without leaking plugin-internal paths or Roblox's generic module-load wrapper |
 | `proxy-mode-peer-fanout.mjs` | `get_runtime_logs target=all`, `get_connected_instances`, and `get_memory_breakdown target=all` return non-empty capture/peer data when invoked from a proxy-mode subprocess (the multi-session path) |
 | `execute-luau-output-capture.mjs` | `execute_luau target=server` captures user `print()` and `warn()` calls in the response `output` array, matching the `target=edit` baseline |
-| `multiplayer-test-lifecycle.mjs` | `multiplayer_test_start`, add-player, client-leave, state, and end-test flow against real StudioTestService multiplayer peers |
+| `multiplayer-test-lifecycle.mjs` | Temporarily skipped because of a known Roblox StudioTestService multiplayer regression |
 
 ## Lifecycle and cleanup
 
 - Most tests call `start_playtest` once at the top and `stop_playtest` in a
-  `finally` block. The multiplayer lifecycle test uses `multiplayer_test_*`
-  tools and falls back to `stop_playtest` for cleanup if interrupted.
+  `finally` block. Multiplayer lifecycle coverage is temporarily skipped.
 - Tests do not modify the place's persistent state — they only print, eval,
   and read from the runtime log buffer.
 

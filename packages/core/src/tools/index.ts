@@ -3564,21 +3564,6 @@ export class RobloxStudioTools {
     };
   }
 
-  async characterNavigation(position?: number[], instancePath?: string, waitForCompletion?: boolean, timeout?: number, target?: string, instance_id?: string) {
-    if (!position && !instancePath) {
-      throw new Error('Either position or instancePath is required for character_navigation');
-    }
-    const response = await this._callSingle('/api/character-navigation', {
-      position, instancePath, waitForCompletion, timeout
-    }, target || 'edit', instance_id);
-    return {
-      content: [{
-        type: 'text',
-        text: JSON.stringify(response)
-      }]
-    };
-  }
-
   async cloneObject(instancePath: string, targetParentPath: string, instance_id?: string) {
     if (!instancePath || !targetParentPath) {
       throw new Error('instancePath and targetParentPath are required for clone_object');

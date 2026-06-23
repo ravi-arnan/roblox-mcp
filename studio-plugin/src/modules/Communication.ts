@@ -152,7 +152,6 @@ const routeMap: Record<string, Handler> = {
 	"/api/multiplayer-test-add-players": TestHandlers.multiplayerTestAddPlayers,
 	"/api/multiplayer-test-leave-client": TestHandlers.multiplayerTestLeaveClient,
 	"/api/multiplayer-test-end": TestHandlers.multiplayerTestEnd,
-	"/api/character-navigation": TestHandlers.characterNavigation,
 
 	"/api/export-build": BuildHandlers.exportBuild,
 	"/api/import-build": BuildHandlers.importBuild,
@@ -308,6 +307,7 @@ function sendReady(conn: Connection): void {
 		lastReadyInstanceId = parseOk && typeIs(readyData.instanceId, "string") && readyData.instanceId !== ""
 			? readyData.instanceId
 			: instanceId;
+		ServerUrlSettings.rememberServerUrl(conn.serverUrl);
 		const connectedRole = assignedRole ?? detectRole();
 		if (readyFailureLogKeys.has(readyLogKey)) {
 			readyFailureLogKeys.delete(readyLogKey);
@@ -503,13 +503,15 @@ function activatePlugin(connIndex?: number) {
 	conn.currentRetryDelay = 0.5;
 
 	if (idx === State.getActiveTabIndex()) {
-		conn.serverUrl = ui.urlInput.Text;
-		const [portStr] = conn.serverUrl.match(":(%d+)$");
-		if (portStr) conn.port = tonumber(portStr) ?? conn.port;
+		const normalizedUrl = ServerUrlSettings.normalizeServerUrl(ui.urlInput.Text);
+		conn.serverUrl = normalizedUrl !== "" ? normalizedUrl : conn.serverUrl;
+		if (conn.serverUrl === "") conn.serverUrl = ClientBroker.DEFAULT_MCP_URL;
+		ui.urlInput.Text = conn.serverUrl;
+		const port = ServerUrlSettings.extractPort(conn.serverUrl);
+		if (port !== undefined) conn.port = port;
 		UI.updateTabLabel(idx);
 		UI.updateUIState();
 	}
-	ServerUrlSettings.rememberServerUrl(conn.serverUrl);
 	UI.updateTabDot(idx);
 
 	if (!conn.heartbeatConnection) {
