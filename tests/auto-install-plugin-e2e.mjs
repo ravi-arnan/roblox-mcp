@@ -9,8 +9,6 @@ import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { McpClient, REPO_ROOT } from './lib/mcp-client.mjs';
 import {
-  closeAllStudio,
-  launchStudio,
   listStudioProcesses,
   resolvePluginsDir,
 } from '../scripts/studio-lifecycle.mjs';
@@ -166,10 +164,6 @@ function createPlaceFixture(pluginsDir) {
   return { fixtureDir, placePath };
 }
 
-function launchStudioPlace(placePath) {
-  launchStudio([placePath]);
-}
-
 function packTarballPath(stdout, destination) {
   const packed = stdout
     .split(/\r?\n/)
@@ -258,6 +252,11 @@ function assertArtifactSupportsVersionMetadata(artifact) {
   assert(asset.includes('pluginVersion'), `${artifact.source} ${artifact.variant} artifact sends plugin version metadata`);
 }
 
+function assertArtifactIncludesTool(artifact, toolName) {
+  const server = readFileSync(artifact.indexPath, 'utf8');
+  assert(server.includes(toolName), `${artifact.source} ${artifact.variant} artifact includes ${toolName}`);
+}
+
 function commandFor(artifact, { autoInstall }) {
   const extra = [];
   if (autoInstall) {
@@ -292,31 +291,41 @@ async function smokeAutoInstall(artifact, tmpRoot) {
   assert(!result.stdout.includes('[install-plugin]') && !result.stdout.includes('Installed '), 'installer does not write status text to stdout');
 }
 
-async function selectArtifact(def, tmpRoot) {
+async function selectLocalArtifact(def, tmpRoot, reason) {
+  if (reason) console.warn(`artifactSource(${def.variant}): using local-pack (${reason})`);
+  const local = await packLocal(def, tmpRoot);
+  assertArtifactSupportsVersionMetadata(local);
+  if (def.variant === 'main') assertArtifactIncludesTool(local, 'manage_instance');
+  await smokeAutoInstall(local, tmpRoot);
+  console.log(`artifactSource(${def.variant}): local-pack v${local.version}`);
+  return local;
+}
+
+async function selectArtifact(def, tmpRoot, { forceLocal = false } = {}) {
+  if (forceLocal) {
+    return selectLocalArtifact(def, tmpRoot, 'paired with local main artifact');
+  }
   try {
     const latest = await packLatest(def, tmpRoot);
     assertArtifactSupportsVersionMetadata(latest);
+    if (def.variant === 'main') assertArtifactIncludesTool(latest, 'manage_instance');
     await smokeAutoInstall(latest, tmpRoot);
     console.log(`artifactSource(${def.variant}): latest v${latest.version}`);
     return latest;
   } catch (err) {
     console.warn(`artifactSource(${def.variant}): latest unavailable, falling back to local-pack (${err.message})`);
-    const local = await packLocal(def, tmpRoot);
-    assertArtifactSupportsVersionMetadata(local);
-    await smokeAutoInstall(local, tmpRoot);
-    console.log(`artifactSource(${def.variant}): local-pack v${local.version}`);
-    return local;
+    return selectLocalArtifact(def, tmpRoot);
   }
 }
 
-async function waitForEditInstance(client, expected, timeoutMs = 120000) {
+async function waitForEditInstance(client, expected, instanceId, timeoutMs = 120000) {
   const deadline = Date.now() + timeoutMs;
   let last;
   while (Date.now() < deadline) {
     try {
       const connected = await client.callTool('get_connected_instances', {});
       const instances = connected.instances ?? [];
-      const edit = instances.find((inst) => inst.role === 'edit');
+      const edit = instances.find((inst) => inst.role === 'edit' && inst.instanceId === instanceId);
       if (edit) {
         assert(edit.pluginVariant === expected.variant, `Studio loaded ${expected.variant} plugin variant`);
         assert(edit.pluginVersion === expected.version, `Studio plugin version is v${expected.version}`);
@@ -330,7 +339,7 @@ async function waitForEditInstance(client, expected, timeoutMs = 120000) {
     }
     await delay(1000);
   }
-  throw new Error(`No edit instance connected within ${timeoutMs}ms. Last: ${JSON.stringify(last)}`);
+  throw new Error(`No edit instance ${instanceId} connected within ${timeoutMs}ms. Last: ${JSON.stringify(last)}`);
 }
 
 async function startClient(label, artifact, { autoInstall }) {
@@ -344,6 +353,36 @@ async function startClient(label, artifact, { autoInstall }) {
   await client.start();
   await client.initialize();
   return client;
+}
+
+async function startManagerForArtifact(label, managerArtifact) {
+  return startClient(label, managerArtifact, { autoInstall: false });
+}
+
+async function launchManagedPlace(managerClient, placePath) {
+  const launched = await managerClient.callTool('manage_instance', {
+    action: 'launch',
+    source: 'local_file',
+    local_place_file: placePath,
+    timeout_ms: 120000,
+  });
+  assert(!!launched.instance_id, `manage_instance launched Studio (${JSON.stringify(launched)})`);
+  return launched.instance_id;
+}
+
+async function closeManagedInstance(managerClient, instanceId) {
+  if (!managerClient || !instanceId) return;
+  const closed = await managerClient.callTool('manage_instance', {
+    action: 'close',
+    instance_id: instanceId,
+  });
+  assert(!closed.error, `manage_instance closed Studio instance ${instanceId}`);
+  const deadline = Date.now() + 30000;
+  while (Date.now() < deadline) {
+    if (listStudioProcesses().length === 0) return;
+    await delay(500);
+  }
+  throw new Error(`Studio processes remain after manage_instance close: ${JSON.stringify(listStudioProcesses())}`);
 }
 
 async function assertToolSurface(client, artifact, instanceId) {
@@ -388,82 +427,127 @@ async function waitForStudioLog(client, instanceId, needle, timeoutMs = 30000) {
   throw new Error(`Studio output did not contain ${needle}. Last logs: ${JSON.stringify(last)}`);
 }
 
-async function runMatchingCase(artifact, pluginsDir, placePath) {
+async function runMatchingCase(artifact, managerArtifact, pluginsDir, placePath) {
   console.log(`\n=== ${artifact.variant} auto-install loads matching plugin ===`);
-  await closeAllStudio();
   removeVariantFiles(pluginsDir);
 
-  const client = await startClient(`${artifact.variant}-match`, artifact, { autoInstall: true });
+  let managerClient;
+  let client;
+  let instanceId;
   try {
+    managerClient = artifact.variant === 'main'
+      ? undefined
+      : await startManagerForArtifact(`${artifact.variant}-match-manager`, managerArtifact);
+    client = await startClient(`${artifact.variant}-match`, artifact, { autoInstall: true });
+    const launcher = managerClient ?? client;
+
     const installed = path.join(pluginsDir, artifact.asset);
     assert(existsSync(installed), `${artifact.asset} installed in real Studio plugins folder`);
     assert(!existsSync(path.join(pluginsDir, artifact.otherAsset)), `${artifact.otherAsset} is absent`);
     assert(compareFiles(artifact.assetPath, installed), 'installed plugin matches artifact bundle');
 
-    launchStudioPlace(placePath);
+    instanceId = await launchManagedPlace(launcher, placePath);
     const edit = await waitForEditInstance(client, {
       variant: artifact.variant,
       version: artifact.version,
       serverVersion: artifact.version,
       versionMismatch: false,
-    });
+    }, instanceId);
     await assertToolSurface(client, artifact, edit.instanceId);
   } finally {
-    await client.stop();
+    const launcher = managerClient ?? client;
+    if (launcher) {
+      await closeManagedInstance(launcher, instanceId).catch((err) => {
+        console.warn(`  (manage_instance close cleanup failed): ${err.message}`);
+      });
+    }
+    if (client) await client.stop();
+    if (managerClient) await managerClient.stop();
     await waitPortClosed(58741).catch(() => {});
-    await closeAllStudio();
   }
 }
 
-async function runMismatchCase(artifact, pluginsDir, placePath) {
+async function runMismatchCase(artifact, managerArtifact, pluginsDir, placePath) {
   console.log(`\n=== ${artifact.variant} mismatch is visible and repairable ===`);
-  await closeAllStudio();
   removeVariantFiles(pluginsDir);
   writeMismatchedPlugin(artifact, pluginsDir);
 
-  const mismatchClient = await startClient(`${artifact.variant}-mismatch`, artifact, { autoInstall: false });
+  let mismatchManager;
+  let mismatchClient;
   let mismatchEdit;
+  let mismatchInstanceId;
   try {
-    launchStudioPlace(placePath);
+    mismatchManager = artifact.variant === 'main'
+      ? undefined
+      : await startManagerForArtifact(`${artifact.variant}-mismatch-manager`, managerArtifact);
+    mismatchClient = await startClient(`${artifact.variant}-mismatch`, artifact, { autoInstall: false });
+    const mismatchLauncher = mismatchManager ?? mismatchClient;
+
+    mismatchInstanceId = await launchManagedPlace(mismatchLauncher, placePath);
     mismatchEdit = await waitForEditInstance(mismatchClient, {
       variant: artifact.variant,
       version: `${artifact.version}-mismatch`,
       serverVersion: artifact.version,
       versionMismatch: true,
-    });
+    }, mismatchInstanceId);
     await assertToolSurface(mismatchClient, artifact, mismatchEdit.instanceId);
-    assert(mismatchClient.recentStderr(50).includes('[version-mismatch]'), 'server stderr contains version mismatch warning');
+    const mismatchLogs = `${mismatchClient.recentStderr(50)}\n${mismatchManager?.recentStderr(50) ?? ''}`;
+    assert(mismatchLogs.includes('[version-mismatch]'), 'server stderr contains version mismatch warning');
     await waitForStudioLog(mismatchClient, mismatchEdit.instanceId, 'Version mismatch');
     assert(true, 'Studio output contains version mismatch warning');
   } finally {
-    await mismatchClient.stop();
+    const mismatchLauncher = mismatchManager ?? mismatchClient;
+    if (mismatchLauncher) {
+      await closeManagedInstance(mismatchLauncher, mismatchEdit?.instanceId ?? mismatchInstanceId).catch((err) => {
+        console.warn(`  (manage_instance close cleanup failed): ${err.message}`);
+      });
+    }
+    if (mismatchClient) await mismatchClient.stop();
+    if (mismatchManager) await mismatchManager.stop();
     await waitPortClosed(58741).catch(() => {});
-    await closeAllStudio();
   }
 
-  const repairClient = await startClient(`${artifact.variant}-repair`, artifact, { autoInstall: true });
+  let repairManager;
+  let repairClient;
+  let repairInstanceId;
   try {
+    repairManager = artifact.variant === 'main'
+      ? undefined
+      : await startManagerForArtifact(`${artifact.variant}-repair-manager`, managerArtifact);
+    repairClient = await startClient(`${artifact.variant}-repair`, artifact, { autoInstall: true });
+    const repairLauncher = repairManager ?? repairClient;
+
     assert(compareFiles(artifact.assetPath, path.join(pluginsDir, artifact.asset)), 'auto-install repaired mismatched plugin file');
-    launchStudioPlace(placePath);
+    repairInstanceId = await launchManagedPlace(repairLauncher, placePath);
     await waitForEditInstance(repairClient, {
       variant: artifact.variant,
       version: artifact.version,
       serverVersion: artifact.version,
       versionMismatch: false,
-    });
+    }, repairInstanceId);
   } finally {
-    await repairClient.stop();
+    const repairLauncher = repairManager ?? repairClient;
+    if (repairLauncher) {
+      await closeManagedInstance(repairLauncher, repairInstanceId).catch((err) => {
+        console.warn(`  (manage_instance close cleanup failed): ${err.message}`);
+      });
+    }
+    if (repairClient) await repairClient.stop();
+    if (repairManager) await repairManager.stop();
     await waitPortClosed(58741).catch(() => {});
-    await closeAllStudio();
   }
 }
 
 async function main() {
   if (process.env.RSMCP_E2E_CLOSE_ALL_STUDIO !== '1') {
-    throw new Error('This E2E closes Roblox Studio. Set RSMCP_E2E_CLOSE_ALL_STUDIO=1 to run it.');
+    throw new Error('This E2E launches and closes managed Roblox Studio instances. Set RSMCP_E2E_CLOSE_ALL_STUDIO=1 to run it.');
   }
   if (await isPortOpen(58741)) {
     throw new Error('Port 58741 is already occupied. Stop existing MCP servers before running this E2E.');
+  }
+  const existingStudio = listStudioProcesses();
+  if (existingStudio.length > 0) {
+    throw new Error(`Close existing Studio windows before running this E2E: ${JSON.stringify(existingStudio)}`);
   }
 
   const tmpRoot = await mkdtemp(path.join(os.tmpdir(), 'robloxstudio-mcp-e2e-'));
@@ -472,18 +556,17 @@ async function main() {
   const { fixtureDir, placePath } = createPlaceFixture(pluginsDir);
 
   try {
-    await closeAllStudio();
+    const mainArtifact = await selectArtifact(VARIANTS.main, tmpRoot);
     const artifacts = [
-      await selectArtifact(VARIANTS.main, tmpRoot),
-      await selectArtifact(VARIANTS.inspector, tmpRoot),
+      mainArtifact,
+      await selectArtifact(VARIANTS.inspector, tmpRoot, { forceLocal: mainArtifact.source === 'local-pack' }),
     ];
 
     for (const artifact of artifacts) {
-      await runMatchingCase(artifact, pluginsDir, placePath);
-      await runMismatchCase(artifact, pluginsDir, placePath);
+      await runMatchingCase(artifact, mainArtifact, pluginsDir, placePath);
+      await runMismatchCase(artifact, mainArtifact, pluginsDir, placePath);
     }
   } finally {
-    await closeAllStudio().catch(() => {});
     restorePluginFiles(pluginsDir, backups);
     rmSync(fixtureDir, { recursive: true, force: true });
     const remaining = listStudioProcesses();

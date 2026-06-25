@@ -69,6 +69,7 @@ await runTest('simulation state tools reset network and device simulator determi
     const listed = await client.rpc('tools/list', {});
     const names = new Set((listed.tools ?? []).map((tool) => tool.name));
     for (const tool of [
+      'solo_playtest',
       'get_simulation_state',
       'reset_simulation_state',
       'set_network_profile',
@@ -97,7 +98,7 @@ await runTest('simulation state tools reset network and device simulator determi
     state = await client.callTool('get_simulation_state', { target: 'edit', include: 'deviceSimulator', instance_id: instanceId });
     assertDeviceDefault(state.roles.edit, 'edit after matrix restore');
 
-    const playStart = await client.callTool('start_playtest', { mode: 'play', instance_id: instanceId });
+    const playStart = await client.callTool('solo_playtest', { action: 'start', mode: 'play', instance_id: instanceId });
     playStarted = true;
     assert(playStart.success === true, 'normal Play starts');
     assert(playStart.roles.includes('client-1'), 'normal Play registers client-1');
@@ -137,7 +138,7 @@ await runTest('simulation state tools reset network and device simulator determi
     );
 
     await client.callTool('reset_simulation_state', { target: 'edit-and-clients', instance_id: instanceId });
-    await client.callTool('stop_playtest', { instance_id: instanceId });
+    await client.callTool('solo_playtest', { action: 'stop', instance_id: instanceId });
     playStarted = false;
     await delay(1000);
     await client.callTool('reset_simulation_state', { target: 'edit', instance_id: instanceId });
@@ -156,7 +157,7 @@ await runTest('simulation state tools reset network and device simulator determi
           // Best-effort cleanup.
         }
         try {
-          await client.callTool('multiplayer_test_end', { timeout: 45, instance_id: instanceId });
+          await client.callTool('multiplayer_playtest', { action: 'end', timeout: 45, instance_id: instanceId });
         } catch {
           // Best-effort cleanup.
         }
@@ -168,7 +169,7 @@ await runTest('simulation state tools reset network and device simulator determi
           // Best-effort cleanup.
         }
         try {
-          await client.callTool('stop_playtest', { instance_id: instanceId });
+        await client.callTool('solo_playtest', { action: 'stop', instance_id: instanceId });
         } catch {
           // Best-effort cleanup.
         }

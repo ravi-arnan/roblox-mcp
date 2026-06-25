@@ -1,6 +1,7 @@
 import { BridgeService } from '../bridge-service.js';
 import { createHttpServer } from '../http-server.js';
 import { RobloxStudioTools } from '../tools/index.js';
+import { buildStudioLaunchArgs } from '../studio-instance-manager.js';
 import request from 'supertest';
 import * as fs from 'fs';
 import * as os from 'os';
@@ -110,7 +111,199 @@ describe('Smoke', () => {
   test('start_playtest rejects numPlayers', async () => {
     const bridge = new BridgeService();
     const tools = new RobloxStudioTools(bridge);
-    await expect(tools.startPlaytest('play', 1)).rejects.toThrow(/multiplayer_test_start/);
+    await expect(tools.startPlaytest('play', 1)).rejects.toThrow(/multiplayer_playtest/);
+  });
+
+  test('manage_instance blocks launching an already connected latest published place', async () => {
+    const bridge = new BridgeService();
+    const tools = new RobloxStudioTools(bridge);
+    bridge.registerInstance({
+      ...READY,
+      instanceId: 'place:123',
+      placeId: 123,
+    });
+    const launch = jest.fn();
+    (tools as any).instanceManager = {
+      list: () => [],
+      launch,
+    };
+
+    const result = await tools.manageInstance({
+      action: 'launch',
+      source: 'published_place',
+      place_id: 123,
+      universe_id: 456,
+      wait_for_connection: false,
+    });
+
+    const body = JSON.parse(result.content[0].text);
+    expect(body).toEqual({
+      error: 'Place is already open.',
+      message: 'place_id 123 is already connected. Use the existing instance or launch a specific place_revision.',
+    });
+    expect(launch).not.toHaveBeenCalled();
+  });
+
+  test('manage_instance allows launching an explicit past revision for an already connected place', async () => {
+    const bridge = new BridgeService();
+    const tools = new RobloxStudioTools(bridge);
+    bridge.registerInstance({
+      ...READY,
+      instanceId: 'place:123',
+      placeId: 123,
+    });
+    const launch = jest.fn(async (options) => ({
+      ...options,
+      exe: 'RobloxStudioBeta.exe',
+      args: [],
+      launchedAt: Date.now(),
+    }));
+    (tools as any).instanceManager = {
+      list: () => [],
+      launch,
+    };
+
+    const result = await tools.manageInstance({
+      action: 'launch',
+      source: 'place_revision',
+      place_id: 123,
+      universe_id: 456,
+      place_version: 7,
+      wait_for_connection: false,
+    });
+
+    const body = JSON.parse(result.content[0].text);
+    expect(body).toEqual({ message: 'Studio launch requested.' });
+    expect(launch).toHaveBeenCalledWith({
+      source: 'place_revision',
+      localPlaceFile: undefined,
+      placeId: 123,
+      universeId: 456,
+      placeVersion: 7,
+    });
+  });
+
+  test('manage_instance close accepts an explicit connected unmanaged instance', async () => {
+    const bridge = new BridgeService();
+    const tools = new RobloxStudioTools(bridge);
+    bridge.registerInstance({
+      ...READY,
+      instanceId: 'anon:external',
+      placeName: 'ExternalPlace',
+      dataModelName: 'ExternalPlace',
+    });
+    bridge.registerInstance({
+      ...READY,
+      pluginSessionId: 'session-server',
+      instanceId: 'anon:external',
+      role: 'server',
+      placeName: 'ExternalPlace',
+      dataModelName: 'ExternalPlace',
+      isRunning: true,
+    });
+    const closeConnectedInstance = jest.fn();
+    (tools as any).instanceManager = {
+      get: () => undefined,
+      closeConnectedInstance,
+    };
+
+    const result = await tools.manageInstance({
+      action: 'close',
+      instance_id: 'anon:external',
+    });
+
+    const body = JSON.parse(result.content[0].text);
+    expect(body).toEqual({
+      instance_id: 'anon:external',
+      message: 'Studio instance closed.',
+    });
+    expect(closeConnectedInstance).toHaveBeenCalledWith(expect.objectContaining({
+      instanceId: 'anon:external',
+      role: 'edit',
+      dataModelName: 'ExternalPlace',
+    }));
+    expect(bridge.getPublicInstances()).toEqual([]);
+  });
+
+  test('manage_instance close returns a compact error for an unclosable connected unmanaged instance', async () => {
+    const bridge = new BridgeService();
+    const tools = new RobloxStudioTools(bridge);
+    bridge.registerInstance({
+      ...READY,
+      instanceId: 'anon:external',
+      placeName: 'ExternalPlace',
+      dataModelName: 'ExternalPlace',
+    });
+    (tools as any).instanceManager = {
+      get: () => undefined,
+      closeConnectedInstance: () => {
+        throw new Error('Could not find a Studio process for connected instance "anon:external".');
+      },
+    };
+
+    const result = await tools.manageInstance({
+      action: 'close',
+      instance_id: 'anon:external',
+    });
+
+    const body = JSON.parse(result.content[0].text);
+    expect(body).toEqual({
+      error: 'Could not find a Studio process for connected instance "anon:external".',
+      instance_id: 'anon:external',
+    });
+    expect(bridge.getPublicInstances()).toHaveLength(1);
+  });
+
+  test('manage_instance list_place_versions normalizes Open Cloud asset version rows', async () => {
+    const bridge = new BridgeService();
+    const tools = new RobloxStudioTools(bridge);
+    const listAssetVersions = jest.fn(async () => ({
+      assetVersions: [
+        {
+          path: 'assets/123/versions/3135',
+          createTime: '2026-06-25T15:03:29.611780400Z',
+          moderationResult: { moderationState: 'Approved' },
+        },
+      ],
+      nextPageToken: 'next',
+    }));
+    (tools as any).openCloudClient = {
+      hasApiKey: () => true,
+      listAssetVersions,
+    };
+
+    const result = await tools.manageInstance({
+      action: 'list_place_versions',
+      place_id: 123,
+      max_page_size: 100,
+      page_token: 'cursor',
+    });
+
+    expect(listAssetVersions).toHaveBeenCalledWith(123, 50, 'cursor');
+    const body = JSON.parse(result.content[0].text);
+    expect(body).toEqual({
+      versions: [{
+        version: 3135,
+        created_at: '2026-06-25T15:03:29.611780400Z',
+        path: 'assets/123/versions/3135',
+        moderation_state: 'Approved',
+      }],
+      next_page_token: 'next',
+    });
+  });
+
+  test('studio launch args use the documented place revision task', () => {
+    expect(buildStudioLaunchArgs({
+      source: 'place_revision',
+      placeId: 123,
+      universeId: 456,
+      placeVersion: 7,
+    })).toEqual([
+      '--task', 'EditPlaceRevision',
+      '--placeId', '123',
+      '--universeId', '456',
+      '--placeVersion', '7',
+    ]);
   });
 
   test('client broker forwards script profiler captures to client peers', () => {
@@ -530,6 +723,88 @@ describe('Smoke', () => {
       timedOut: false,
     });
     expect(body.roles).toEqual(['edit']);
+  });
+
+  test('solo_playtest start returns a brief ready response', async () => {
+    const bridge = new BridgeService();
+    const tools = new RobloxStudioTools(bridge);
+    bridge.registerInstance(READY);
+
+    const resultPromise = tools.soloPlaytest('start', 'run', 1);
+    const pending = bridge.getPendingRequest('place:test', 'edit');
+    expect(pending).toBeTruthy();
+    bridge.resolveRequest(pending!.requestId, { success: true, message: 'started' });
+    bridge.registerInstance({
+      pluginSessionId: 'server-1',
+      instanceId: 'place:test',
+      role: 'server',
+      placeId: 0,
+      placeName: 'TestPlace',
+      dataModelName: 'TestPlace',
+      isRunning: true,
+    });
+
+    const result = await resultPromise;
+    const body = JSON.parse(result.content[0].text);
+    expect(body).toEqual({
+      success: true,
+      action: 'start',
+      message: 'Playtest started.',
+      roles: ['edit', 'server'],
+    });
+  });
+
+  test('solo_playtest stop returns a brief stopped response', async () => {
+    const bridge = new BridgeService();
+    const tools = new RobloxStudioTools(bridge);
+    bridge.registerInstance(READY);
+    bridge.registerInstance({
+      pluginSessionId: 'server-1',
+      instanceId: 'place:test',
+      role: 'server',
+      placeId: 0,
+      placeName: 'TestPlace',
+      dataModelName: 'TestPlace',
+      isRunning: true,
+    });
+
+    const resultPromise = tools.soloPlaytest('stop', undefined, 1);
+    const pending = bridge.getPendingRequest('place:test', 'edit');
+    expect(pending).toBeTruthy();
+    bridge.resolveRequest(pending!.requestId, { success: true, message: 'stopping' });
+    bridge.unregisterInstance('server-1');
+
+    const result = await resultPromise;
+    const body = JSON.parse(result.content[0].text);
+    expect(body).toEqual({
+      success: true,
+      action: 'stop',
+      message: 'Playtest stopped.',
+    });
+  });
+
+  test('multiplayer_playtest status returns a brief state summary', async () => {
+    const bridge = new BridgeService();
+    const tools = new RobloxStudioTools(bridge);
+    bridge.registerInstance(READY);
+    (tools as any)._buildMultiplayerState = async () => ({
+      phase: 'running',
+      peers: [{ role: 'edit' }, { role: 'server' }, { role: 'client-1' }],
+      clientRoles: ['client-1'],
+      playerCount: 1,
+      testArgs: { noisy: true },
+    });
+
+    const result = await tools.multiplayerPlaytest('status', undefined, undefined, undefined, undefined, undefined, 'place:test');
+    const body = JSON.parse(result.content[0].text);
+    expect(body).toEqual({
+      success: true,
+      action: 'status',
+      phase: 'running',
+      roles: ['edit', 'server', 'client-1'],
+      clientRoles: ['client-1'],
+      playerCount: 1,
+    });
   });
 
   test('get_scene_analysis fans out to connected peers', async () => {

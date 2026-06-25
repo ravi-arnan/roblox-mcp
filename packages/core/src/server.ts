@@ -17,6 +17,7 @@ export interface ServerConfig {
   name: string;
   version: string;
   tools: ToolDefinition[];
+  callableTools?: ToolDefinition[];
 }
 
 export class RobloxStudioMCPServer {
@@ -28,7 +29,7 @@ export class RobloxStudioMCPServer {
 
   constructor(config: ServerConfig) {
     this.config = config;
-    this.allowedToolNames = new Set(config.tools.map(t => t.name));
+    this.allowedToolNames = new Set((config.callableTools ?? config.tools).map(t => t.name));
 
     this.server = new Server(
       {

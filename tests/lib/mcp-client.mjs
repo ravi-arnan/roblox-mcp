@@ -22,6 +22,7 @@ export const DIST = resolve(REPO_ROOT, 'packages/robloxstudio-mcp/dist/index.js'
 export const BASE_PORT = 58741;
 
 const ROUTED_TOOLS = new Set([
+  'solo_playtest',
   'start_playtest',
   'stop_playtest',
   'execute_luau',
@@ -35,6 +36,7 @@ const ROUTED_TOOLS = new Set([
   'capture_device_matrix',
   'get_runtime_logs',
   'get_memory_breakdown',
+  'multiplayer_playtest',
   'multiplayer_test_start',
   'multiplayer_test_state',
   'multiplayer_test_add_players',
@@ -226,13 +228,13 @@ export async function waitForEditPeer(client, { timeoutMs = 60_000, pollMs = 500
 // server peer from a prior test to drain, starts a fresh playtest, then
 // polls until a *new* server peer registers (the play-server DM has spun
 // up and listener buffers are ready). Fixed delays were flaky
-// after a prior test's stop_playtest left Studio mid-teardown.
+// after a prior test's solo_playtest stop left Studio mid-teardown.
 export async function startPlaytestAndWait(client, { timeoutSec = 30, pollMs = 500 } = {}) {
   await waitForEditPeer(client, { timeoutMs: timeoutSec * 1000, pollMs });
 
   // 1. Drain stale server peers (previous test's playtest may still be
   //    tearing down — its server peer can linger for several seconds after
-  //    stop_playtest returns).
+  //    solo_playtest action=stop returns).
   const drainDeadline = Date.now() + 15_000;
   while (Date.now() < drainDeadline) {
     const list = await getInstanceList(client);
@@ -244,8 +246,8 @@ export async function startPlaytestAndWait(client, { timeoutSec = 30, pollMs = 5
   );
 
   // 2. Kick off the playtest.
-  const res = await client.callTool('start_playtest', { mode: 'play' });
-  if (!res.success) throw new Error(`start_playtest failed: ${JSON.stringify(res)}`);
+  const res = await client.callTool('solo_playtest', { action: 'start', mode: 'play' });
+  if (!res.success) throw new Error(`solo_playtest start failed: ${JSON.stringify(res)}`);
 
   // 3. Poll for a fresh (non-stale) server peer to register.
   const deadline = Date.now() + timeoutSec * 1000;
@@ -264,9 +266,9 @@ export async function startPlaytestAndWait(client, { timeoutSec = 30, pollMs = 5
 
 export async function safeStopPlaytest(client) {
   try {
-    await client.callTool('stop_playtest', {});
+    await client.callTool('solo_playtest', { action: 'stop' });
   } catch (err) {
-    console.warn(`  (stop_playtest cleanup error, ignored): ${err.message}`);
+    console.warn(`  (solo_playtest cleanup error, ignored): ${err.message}`);
   }
 }
 

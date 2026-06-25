@@ -466,5 +466,17 @@ describe('BridgeService', () => {
       bridge.resolveRequest(stillPending!.requestId, {});
       await editReq;
     });
+
+    test('unregisterInstanceId immediately removes every role for an instance', async () => {
+      register(bridge, { pluginSessionId: 'edit-1', instanceId: 'anon:1', role: 'edit' });
+      register(bridge, { pluginSessionId: 'server-1', instanceId: 'anon:1', role: 'server' });
+      register(bridge, { pluginSessionId: 'client-1', instanceId: 'anon:1', role: 'client' });
+      register(bridge, { pluginSessionId: 'edit-2', instanceId: 'anon:2', role: 'edit' });
+
+      const removed = bridge.unregisterInstanceId('anon:1');
+
+      expect(removed.map((inst) => inst.role).sort()).toEqual(['client-1', 'edit', 'server']);
+      expect(bridge.getPublicInstances().map((inst) => inst.instanceId)).toEqual(['anon:2']);
+    });
   });
 });

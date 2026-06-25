@@ -1,4 +1,4 @@
-import { RobloxStudioMCPServer, getReadOnlyTools } from '@chrrxs/robloxstudio-mcp-core';
+import { RobloxStudioMCPServer, getReadOnlyCallableTools, getReadOnlyTools } from '@chrrxs/robloxstudio-mcp-core';
 import { createRequire } from 'module';
 
 if (process.argv.includes('--install-plugin')) {
@@ -27,6 +27,7 @@ if (process.argv.includes('--install-plugin')) {
     name: 'robloxstudio-mcp-inspector',
     version: VERSION,
     tools: getReadOnlyTools(),
+    callableTools: getReadOnlyCallableTools(),
   });
 
   server.run().catch((error) => {

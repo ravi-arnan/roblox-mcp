@@ -303,6 +303,15 @@ export class BridgeService {
     }
   }
 
+  unregisterInstanceId(instanceId: string): PublicPluginInstance[] {
+    const matching = this.matchingInstancesForInstanceId(instanceId);
+    const removed = matching.map(toPublic);
+    for (const inst of matching) {
+      this.unregisterInstance(inst.pluginSessionId);
+    }
+    return removed;
+  }
+
   getInstances(): PluginInstance[] {
     return Array.from(this.instances.values());
   }

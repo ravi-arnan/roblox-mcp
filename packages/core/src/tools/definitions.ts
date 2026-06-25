@@ -982,43 +982,93 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     }
   },
 
-  // === Playtest ===
+  // === Studio Instance Management ===
   {
-    name: 'start_playtest',
+    name: 'manage_instance',
     category: 'write',
-    description: 'Start a simple single-player Studio playtest in play or run mode, waiting until a runtime peer registers with MCP. Read print/warn/error output with get_runtime_logs, then end with stop_playtest. For multi-client testing use multiplayer_test_start instead.',
+    description: 'Launch, close, inspect, and find revisions for Studio instances. Use action="list_place_versions" with place_id to retrieve version numbers through Open Cloud asset versions, then action="launch" with source="place_revision" and place_version to open an older revision. action="close" can close an MCP-managed instance or an explicitly connected edit instance by instance_id. action="launch" source="published_place" opens the latest published place and is blocked if that place_id is already connected; source="place_revision" is allowed because Studio opens explicit past revisions as anonymous local copies. Requires ROBLOX_OPEN_CLOUD_API_KEY with asset:read for list_place_versions.',
     inputSchema: {
       type: 'object',
       properties: {
+        action: {
+          type: 'string',
+          enum: ['launch', 'close', 'status', 'list_place_versions'],
+          description: 'Instance management action.'
+        },
+        source: {
+          type: 'string',
+          enum: ['baseplate', 'local_file', 'published_place', 'place_revision'],
+          description: 'Required for action="launch". published_place opens the latest place; place_revision opens a specific older version as an anonymous local copy.'
+        },
+        local_place_file: {
+          type: 'string',
+          description: 'Required for source="local_file". Path to a .rbxl/.rbxlx place file.'
+        },
+        place_id: {
+          type: 'number',
+          description: 'Required for source="published_place", source="place_revision", and action="list_place_versions".'
+        },
+        universe_id: {
+          type: 'number',
+          description: 'Optional for published_place/place_revision launches; derived from place_id when omitted.'
+        },
+        place_version: {
+          type: 'number',
+          description: 'Required for source="place_revision". Use action="list_place_versions" to discover available version numbers.'
+        },
+        wait_for_connection: {
+          type: 'boolean',
+          description: 'For action="launch": wait until the MCP plugin connects and return instance_id (default true).'
+        },
+        timeout_ms: {
+          type: 'number',
+          description: 'For action="launch": max milliseconds to wait for plugin connection (default 120000).'
+        },
+        max_page_size: {
+          type: 'number',
+          description: 'For action="list_place_versions": number of versions to return, clamped to 1-50 (default 10).'
+        },
+        page_token: {
+          type: 'string',
+          description: 'For action="list_place_versions": pagination token returned by a prior call.'
+        },
+        instance_id: {
+          type: 'string',
+          description: 'For action="close" or action="status": Studio instance to inspect or close. close accepts MCP-managed instances and explicitly connected edit instances.'
+        }
+      },
+      required: ['action']
+    }
+  },
+
+  // === Playtest ===
+  {
+    name: 'solo_playtest',
+    category: 'write',
+    description: 'Start, stop, or inspect a single-player Studio playtest. Use action="start" with mode="play" or "run", action="stop" to end the playtest, and action="status" to inspect active runtime roles. Returns brief lifecycle status only; read script output with get_runtime_logs. Ordinary start/eval/stop workflows do not need reset_simulation_state; use simulation reset only for network or device-simulator tests. For multi-client testing use multiplayer_playtest.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: {
+          type: 'string',
+          enum: ['start', 'stop', 'status'],
+          description: 'Lifecycle action to run.'
+        },
         mode: {
           type: 'string',
           enum: ['play', 'run'],
-          description: 'Play mode'
+          description: 'Required for action="start".'
         },
-        numPlayers: {
+        timeout: {
           type: 'number',
-          description: 'Deprecated and rejected. Use multiplayer_test_start for multi-client testing.'
+          description: 'Max seconds to wait for start readiness or stop teardown. Defaults: start 60, stop 15.'
         },
         instance_id: {
           type: 'string',
           description: 'Which connected Studio place to target. Required when multiple places are connected; omit when one. Use get_connected_instances to list available IDs.'
         }
       },
-      required: ['mode']
-    }
-  },
-  {
-    name: 'stop_playtest',
-    category: 'write',
-    description: 'Stop playtest and wait for runtime peers to disconnect.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        instance_id: {
-          type: 'string',
-          description: 'Which connected Studio place to target. Required when multiple places are connected; omit when one. Use get_connected_instances to list available IDs.'
-        }
-      }
+      required: ['action']
     }
   },
   {
@@ -1087,7 +1137,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: 'get_simulation_state',
     category: 'read',
-    description: 'Inspect current NetworkSettings and/or StudioDeviceSimulatorService state for edit and connected playtest clients only. Defaults to include="both" and target="edit-and-clients"; server peers are skipped. Use before diagnosing network or device-sensitive tests, especially because normal Play can write client simulator changes back to edit and StudioTestService clients can inherit stale device simulator state.',
+    description: 'Inspect current NetworkSettings and/or StudioDeviceSimulatorService state for edit and connected clients only. Defaults to include="both" and target="edit-and-clients"; server peers are skipped. Use when a task explicitly involves simulated network/device behavior or when you suspect stale simulator state. This is not part of ordinary playtest lifecycle.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1110,7 +1160,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: 'reset_simulation_state',
     category: 'write',
-    description: 'Reset reachable simulation state to a clean baseline for deterministic tests. Defaults to target="edit-and-clients" and resets both network and device simulator state. Network reset sets all six simulated NetworkSettings fields to 0; device reset calls StopSimulationAsync(). Call before tests, after starting Play or multiplayer, before stopping, and again on edit after stopping.',
+    description: 'Reset reachable NetworkSettings and/or StudioDeviceSimulatorService state for deterministic network/device tests. Defaults to target="edit-and-clients" and resets both network and device simulator state. Network reset sets all six simulated NetworkSettings fields to 0; device reset calls StopSimulationAsync(). Do not call as routine Studio lifecycle hygiene. Use it after intentionally changing simulation settings, when get_simulation_state shows dirty state, or when a task explicitly requires a clean network/device baseline.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1296,109 +1346,41 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     }
   },
   {
-    name: 'multiplayer_test_start',
+    name: 'multiplayer_playtest',
     category: 'write',
-    description: 'Start a StudioTestService multiplayer test and wait for the server plus requested client peers to connect. Use this for multi-client runtime testing.',
+    description: 'Start, inspect, add players to, remove a client from, or end a StudioTestService multiplayer playtest. Use action="start" with numPlayers, action="status", action="add_players" with numPlayers, action="leave_client" with target="client-N", or action="end". Returns brief lifecycle status only; read script output with get_runtime_logs.',
     inputSchema: {
       type: 'object',
       properties: {
+        action: {
+          type: 'string',
+          enum: ['start', 'status', 'add_players', 'leave_client', 'end'],
+          description: 'Lifecycle action to run.'
+        },
         numPlayers: {
           type: 'number',
-          description: 'Number of client players to start (1-8).'
+          description: 'Required for action="start" and action="add_players". Number of client players (1-8).'
         },
-        testArgs: {
-          description: 'JSON-compatible table passed to StudioTestService:GetTestArgs() on server and clients.'
-        },
-        timeout: {
-          type: 'number',
-          description: 'Max seconds to wait for server + clients to register (default 30).'
-        },
-        instance_id: {
-          type: 'string',
-          description: 'Which connected Studio place to target. Required when multiple places are connected; omit when one. Use get_connected_instances to list available IDs.'
-        }
-      },
-      required: ['numPlayers']
-    }
-  },
-  {
-    name: 'multiplayer_test_state',
-    category: 'read',
-    description: 'Get the active multiplayer StudioTestService state for a place: phase, peers, players, original testArgs, result/error, and connected client roles.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        instance_id: {
-          type: 'string',
-          description: 'Which connected Studio place to inspect. Required when multiple places are connected; omit when one. Use get_connected_instances to list available IDs.'
-        }
-      }
-    }
-  },
-  {
-    name: 'multiplayer_test_add_players',
-    category: 'write',
-    description: 'Add client players to a running StudioTestService multiplayer test and wait for the new clients to connect.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        numPlayers: {
-          type: 'number',
-          description: 'Number of additional client players to add (1-8).'
-        },
-        timeout: {
-          type: 'number',
-          description: 'Max seconds to wait for new clients to register (default 30).'
-        },
-        instance_id: {
-          type: 'string',
-          description: 'Which connected Studio place to target. Required when multiple places are connected; omit when one. Use get_connected_instances to list available IDs.'
-        }
-      },
-      required: ['numPlayers']
-    }
-  },
-  {
-    name: 'multiplayer_test_leave_client',
-    category: 'write',
-    description: 'Disconnect a specific client from a running StudioTestService multiplayer test, then wait for that client peer to leave.',
-    inputSchema: {
-      type: 'object',
-      properties: {
         target: {
           type: 'string',
-          description: 'Client target to leave: "client-1" (default), "client-2", etc.'
+          description: 'Client target for action="leave_client", such as "client-1". Defaults to "client-1".'
         },
-        timeout: {
-          type: 'number',
-          description: 'Max seconds to wait for the client peer to disconnect (default 30).'
+        testArgs: {
+          description: 'For action="start": JSON-compatible table passed to StudioTestService:GetTestArgs() on server and clients.'
         },
-        instance_id: {
-          type: 'string',
-          description: 'Which connected Studio place to target. Required when multiple places are connected; omit when one. Use get_connected_instances to list available IDs.'
-        }
-      }
-    }
-  },
-  {
-    name: 'multiplayer_test_end',
-    category: 'write',
-    description: 'End a running StudioTestService multiplayer test with an optional return value, then wait for all runtime peers to disconnect.',
-    inputSchema: {
-      type: 'object',
-      properties: {
         value: {
-          description: 'JSON-compatible value returned to the edit-side ExecuteMultiplayerTestAsync call.'
+          description: 'For action="end": JSON-compatible value returned to the edit-side ExecuteMultiplayerTestAsync call.'
         },
         timeout: {
           type: 'number',
-          description: 'Max seconds to wait for runtime peers to disconnect (default 30).'
+          description: 'Max seconds to wait for action completion. Defaults to 30.'
         },
         instance_id: {
           type: 'string',
           description: 'Which connected Studio place to target. Required when multiple places are connected; omit when one. Use get_connected_instances to list available IDs.'
         }
-      }
+      },
+      required: ['action']
     }
   },
   {
@@ -2436,5 +2418,155 @@ part(0,2,0,2,1,1,"b")`,
   },
 ];
 
+export const DEPRECATED_TOOL_DEFINITIONS: ToolDefinition[] = [
+  // === Deprecated Playtest API ===
+  {
+    name: 'start_playtest',
+    category: 'write',
+    description: 'Deprecated. Use solo_playtest with action="start" instead. Starts a simple single-player Studio playtest in play or run mode.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        mode: {
+          type: 'string',
+          enum: ['play', 'run'],
+          description: 'Play mode'
+        },
+        numPlayers: {
+          type: 'number',
+          description: 'Deprecated and rejected. Use multiplayer_playtest action="start" for multi-client testing.'
+        },
+        instance_id: {
+          type: 'string',
+          description: 'Which connected Studio place to target. Required when multiple places are connected; omit when one. Use get_connected_instances to list available IDs.'
+        }
+      },
+      required: ['mode']
+    }
+  },
+  {
+    name: 'stop_playtest',
+    category: 'write',
+    description: 'Deprecated. Use solo_playtest with action="stop" instead. Stops a single-player Studio playtest and waits for runtime peers to disconnect.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        instance_id: {
+          type: 'string',
+          description: 'Which connected Studio place to target. Required when multiple places are connected; omit when one. Use get_connected_instances to list available IDs.'
+        }
+      }
+    }
+  },
+  {
+    name: 'multiplayer_test_start',
+    category: 'write',
+    description: 'Deprecated. Use multiplayer_playtest with action="start" instead. Starts a StudioTestService multiplayer test.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        numPlayers: {
+          type: 'number',
+          description: 'Number of client players to start (1-8).'
+        },
+        testArgs: {
+          description: 'JSON-compatible table passed to StudioTestService:GetTestArgs() on server and clients.'
+        },
+        timeout: {
+          type: 'number',
+          description: 'Max seconds to wait for server + clients to register (default 30).'
+        },
+        instance_id: {
+          type: 'string',
+          description: 'Which connected Studio place to target. Required when multiple places are connected; omit when one. Use get_connected_instances to list available IDs.'
+        }
+      },
+      required: ['numPlayers']
+    }
+  },
+  {
+    name: 'multiplayer_test_state',
+    category: 'read',
+    description: 'Deprecated. Use multiplayer_playtest with action="status" instead. Gets the active multiplayer StudioTestService state.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        instance_id: {
+          type: 'string',
+          description: 'Which connected Studio place to inspect. Required when multiple places are connected; omit when one. Use get_connected_instances to list available IDs.'
+        }
+      }
+    }
+  },
+  {
+    name: 'multiplayer_test_add_players',
+    category: 'write',
+    description: 'Deprecated. Use multiplayer_playtest with action="add_players" instead. Adds client players to a running StudioTestService multiplayer test.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        numPlayers: {
+          type: 'number',
+          description: 'Number of additional client players to add (1-8).'
+        },
+        timeout: {
+          type: 'number',
+          description: 'Max seconds to wait for new clients to register (default 30).'
+        },
+        instance_id: {
+          type: 'string',
+          description: 'Which connected Studio place to target. Required when multiple places are connected; omit when one. Use get_connected_instances to list available IDs.'
+        }
+      },
+      required: ['numPlayers']
+    }
+  },
+  {
+    name: 'multiplayer_test_leave_client',
+    category: 'write',
+    description: 'Deprecated. Use multiplayer_playtest with action="leave_client" instead. Disconnects a specific client from a running StudioTestService multiplayer test.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        target: {
+          type: 'string',
+          description: 'Client target to leave: "client-1" (default), "client-2", etc.'
+        },
+        timeout: {
+          type: 'number',
+          description: 'Max seconds to wait for the client peer to disconnect (default 30).'
+        },
+        instance_id: {
+          type: 'string',
+          description: 'Which connected Studio place to target. Required when multiple places are connected; omit when one. Use get_connected_instances to list available IDs.'
+        }
+      }
+    }
+  },
+  {
+    name: 'multiplayer_test_end',
+    category: 'write',
+    description: 'Deprecated. Use multiplayer_playtest with action="end" instead. Ends a running StudioTestService multiplayer test.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        value: {
+          description: 'JSON-compatible value returned to the edit-side ExecuteMultiplayerTestAsync call.'
+        },
+        timeout: {
+          type: 'number',
+          description: 'Max seconds to wait for runtime peers to disconnect (default 30).'
+        },
+        instance_id: {
+          type: 'string',
+          description: 'Which connected Studio place to target. Required when multiple places are connected; omit when one. Use get_connected_instances to list available IDs.'
+        }
+      }
+    }
+  },
+];
+
 export const getReadOnlyTools = () => TOOL_DEFINITIONS.filter(t => t.category === 'read');
 export const getAllTools = () => [...TOOL_DEFINITIONS];
+export const getReadOnlyCallableTools = () => [...TOOL_DEFINITIONS, ...DEPRECATED_TOOL_DEFINITIONS].filter(t => t.category === 'read');
+export const getAllCallableTools = () => [...TOOL_DEFINITIONS, ...DEPRECATED_TOOL_DEFINITIONS];

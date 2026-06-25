@@ -12,14 +12,15 @@ Use this when you want your agent to debug and operate a live Roblox Studio sess
 - Game-VM eval on the server or a specific client, sharing the same `require` cache as your scripts.
 - Studio log breakpoints that let agents instrument live code without stopping the playtest.
 - Script Profiler captures for server/client CPU hotspots, debug labels, and microsecond timing summaries.
-- Explicit StudioTestService multiplayer runs: start, add/remove clients, inspect state, and end.
+- `solo_playtest` and `multiplayer_playtest` lifecycle tools for starting, stopping, inspecting, and ending playtests without hidden companion-tool discovery.
+- `manage_instance` for launching Studio windows, closing explicit connected instances, and listing place versions for revision launches.
 - Runtime log capture buffers, plus Stats memory and Scene Analysis attribution per peer.
 - Viewport screenshots plus virtual mouse, keyboard, and UI interaction.
 - Bulk property/script/attribute/tag operations for large places.
 - `.rbxm` import/export through `SerializationService`.
 - A read-only inspector package for safer review/debugging sessions.
 
-81 tools total, including file tree inspection, mass reads/writes, script search-and-replace, asset insertion, build import/export, screenshot capture, log breakpoints, Script Profiler captures, runtime eval, memory tools, Scene Analysis, and playtest control.
+77 advertised tools, including file tree inspection, mass reads/writes, script search-and-replace, asset insertion, build import/export, screenshot capture, log breakpoints, Script Profiler captures, runtime eval, memory tools, Scene Analysis, instance management, and playtest control.
 
 ## Setup
 
@@ -80,13 +81,20 @@ On Windows, wrap with `cmd /c` if `npx` doesn't resolve:
 > *"Evaluate `MatchService.activeMatches` on the server while a match is running."*
 > *"Set a log breakpoint on the damage function, reproduce the hit, then read the breakpoint logs."*
 > *"Capture a server Script Profiler sample while the wave spawns and rank the hottest functions."*
+> *"List recent versions for this place, then open version 3134 in a managed Studio window."*
 > *"Spawn 50 NPCs in a 10x5 grid for stress testing."*
+
+## Deprecated API
+
+The split playtest tools are still callable by exact name for existing integrations, but they are no longer advertised through `tools/list`. New integrations should use `solo_playtest` and `multiplayer_playtest`.
+
+Deprecated names: `start_playtest`, `stop_playtest`, `multiplayer_test_start`, `multiplayer_test_state`, `multiplayer_test_add_players`, `multiplayer_test_leave_client`, `multiplayer_test_end`.
 
 ## Inspector edition (read-only)
 
 [![NPM Version](https://img.shields.io/npm/v/@chrrxs/robloxstudio-mcp-inspector)](https://www.npmjs.com/package/@chrrxs/robloxstudio-mcp-inspector)
 
-Same plugin family, different `.rbxmx`. 35 read-only tools — no writes, no script edits, no creation/deletion. Safe for browsing, code review, and debugging without risk of accidental changes.
+Same plugin family, different `.rbxmx`. 36 read-only tools — no writes, no script edits, no creation/deletion. Safe for browsing, code review, and debugging without risk of accidental changes.
 
 Install only one variant at a time. Do not leave both `MCPPlugin.rbxmx` and `MCPInspectorPlugin.rbxmx` in the Studio Plugins folder; Studio loads both and they can register duplicate runtime peers. The CLI installers remove the other variant before installing:
 
@@ -102,7 +110,7 @@ gemini mcp add robloxstudio-inspector npx --trust -- -y @chrrxs/robloxstudio-mcp
 ---
 
 <!-- VERSION_LINE -->
-**v2.17.1**
+**v2.18.0**
 
 ## Building from source
 

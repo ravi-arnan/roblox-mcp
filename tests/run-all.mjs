@@ -29,7 +29,7 @@ const SKIPPED_TESTS = [
 ];
 
 // Studio takes a few seconds to fully tear down a play DM after StudioTestService:EndTest.
-// Without a gap, the next test's start_playtest collides with the previous test's
+// Without a gap, the next test's solo_playtest start collides with the previous test's
 // in-flight cleanup and either times out or sees a stale 1-peer state.
 const INTER_TEST_DELAY_MS = 1000;
 

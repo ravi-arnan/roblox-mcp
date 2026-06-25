@@ -1,4 +1,4 @@
-import { TOOL_DEFINITIONS } from '../tools/definitions.js';
+import { DEPRECATED_TOOL_DEFINITIONS, getAllCallableTools, TOOL_DEFINITIONS } from '../tools/definitions.js';
 import { TOOL_HANDLERS } from '../http-server.js';
 import { RobloxStudioTools } from '../tools/index.js';
 import { BridgeService } from '../bridge-service.js';
@@ -34,10 +34,41 @@ function collectArraySchemasMissingItems(schema: unknown, path: string, out: str
 describe('Tool schema compatibility', () => {
   test('every array schema declares items', () => {
     const missing: string[] = [];
-    for (const tool of TOOL_DEFINITIONS) {
+    for (const tool of getAllCallableTools()) {
       collectArraySchemasMissingItems(tool.inputSchema, tool.name, missing);
     }
     expect(missing).toEqual([]);
+  });
+
+  test('playtest lifecycle exposes canonical tools and keeps deprecated names callable only', () => {
+    const activeNames = new Set(TOOL_DEFINITIONS.map(tool => tool.name));
+    const deprecatedNames = new Set(DEPRECATED_TOOL_DEFINITIONS.map(tool => tool.name));
+    const callableNames = new Set(getAllCallableTools().map(tool => tool.name));
+
+    expect(activeNames.has('solo_playtest')).toBe(true);
+    expect(activeNames.has('multiplayer_playtest')).toBe(true);
+
+    const soloProps = (TOOL_DEFINITIONS.find(tool => tool.name === 'solo_playtest')!.inputSchema as { properties?: Record<string, any>; required?: string[] }).properties ?? {};
+    expect((soloProps.action as { enum?: string[] }).enum).toEqual(['start', 'stop', 'status']);
+    expect((TOOL_DEFINITIONS.find(tool => tool.name === 'solo_playtest')!.inputSchema as { required?: string[] }).required).toEqual(['action']);
+
+    const multiplayerProps = (TOOL_DEFINITIONS.find(tool => tool.name === 'multiplayer_playtest')!.inputSchema as { properties?: Record<string, any>; required?: string[] }).properties ?? {};
+    expect((multiplayerProps.action as { enum?: string[] }).enum).toEqual(['start', 'status', 'add_players', 'leave_client', 'end']);
+    expect((TOOL_DEFINITIONS.find(tool => tool.name === 'multiplayer_playtest')!.inputSchema as { required?: string[] }).required).toEqual(['action']);
+
+    for (const name of [
+      'start_playtest',
+      'stop_playtest',
+      'multiplayer_test_start',
+      'multiplayer_test_state',
+      'multiplayer_test_add_players',
+      'multiplayer_test_leave_client',
+      'multiplayer_test_end',
+    ]) {
+      expect(activeNames.has(name)).toBe(false);
+      expect(deprecatedNames.has(name)).toBe(true);
+      expect(callableNames.has(name)).toBe(true);
+    }
   });
 
   // Tools that don't dispatch to Studio (asset uploads, local file ops, build
@@ -53,6 +84,7 @@ describe('Tool schema compatibility', () => {
     'create_build',
     'generate_build',
     'get_connected_instances',
+    'manage_instance',
   ]);
 
   function toolHandlerBody(toolName: string): string {
@@ -139,8 +171,11 @@ describe('Tool schema compatibility', () => {
       get_device_simulator_state: 'getDeviceSimulatorState',
       set_device_simulator: 'setDeviceSimulator',
       capture_device_matrix: 'captureDeviceMatrix',
+      manage_instance: 'manageInstance',
+      solo_playtest: 'soloPlaytest',
       start_playtest: 'startPlaytest',
       stop_playtest: 'stopPlaytest',
+      multiplayer_playtest: 'multiplayerPlaytest',
       multiplayer_test_start: 'multiplayerTestStart',
       multiplayer_test_state: 'multiplayerTestState',
       multiplayer_test_add_players: 'multiplayerTestAddPlayers',
@@ -203,6 +238,42 @@ describe('Tool schema compatibility', () => {
       'animation_memory',
       'audio_memory',
     ]);
+  });
+
+  test('manage_instance exposes launch, close, status, and place version discovery in one schema', () => {
+    const tool = TOOL_DEFINITIONS.find((t) => t.name === 'manage_instance');
+    expect(tool).toBeTruthy();
+    const schema = tool!.inputSchema as { properties?: Record<string, any>; required?: string[] };
+    const props = schema.properties ?? {};
+    expect((props.action as { enum?: string[] }).enum).toEqual([
+      'launch',
+      'close',
+      'status',
+      'list_place_versions',
+    ]);
+    expect((props.source as { enum?: string[] }).enum).toEqual([
+      'baseplate',
+      'local_file',
+      'published_place',
+      'place_revision',
+    ]);
+    expect(Object.keys(props).sort()).toEqual([
+      'action',
+      'instance_id',
+      'local_place_file',
+      'max_page_size',
+      'page_token',
+      'place_id',
+      'place_version',
+      'source',
+      'timeout_ms',
+      'universe_id',
+      'wait_for_connection',
+    ].sort());
+    expect(schema.required).toEqual(['action']);
+    expect(tool!.description).toContain('list_place_versions');
+    expect(tool!.description).toContain('place_revision');
+    expect(tool!.description).toContain('already connected');
   });
 
   test('breakpoints schema exposes lifecycle actions and log fields', () => {
@@ -327,6 +398,9 @@ describe('Tool schema compatibility', () => {
 
     const resetProps = (resetTool!.inputSchema as { properties?: Record<string, unknown> }).properties ?? {};
     expect(Object.keys(resetProps).sort()).toEqual(['deviceSimulator', 'instance_id', 'network', 'target'].sort());
+    expect(resetTool!.description).toContain('Do not call as routine Studio lifecycle hygiene');
+    expect(resetTool!.description).not.toContain('before stopping');
+    expect(getTool!.description).toContain('not part of ordinary playtest lifecycle');
   });
 
   test('set_network_profile schema caps packet loss at Roblox engine limit', () => {

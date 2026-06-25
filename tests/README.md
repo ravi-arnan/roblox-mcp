@@ -37,11 +37,13 @@ failure the test's MCP subprocess stderr tail is dumped for context.
 ## Release smoke: regular Studio tools
 
 `tests/studio-tooling-smoke.mjs` is a destructive release smoke test for the
-normal main-plugin tool surface. It closes Studio, auto-installs the local main
-plugin into a backed-up plugin folder, opens a temporary `.rbxlx` place, verifies
+normal main-plugin tool surface. It requires Studio to be closed first,
+auto-installs the local main plugin into a backed-up plugin folder, launches a
+temporary `.rbxlx` place through `manage_instance`, verifies
 edit-mode read/write/script/tag/attribute/execute tools, then runs
 `tests/run-all.mjs` against the same primary server to cover playtest, runtime,
-and proxy paths. Multiplayer paths are temporarily skipped because of a known
+and proxy paths. Cleanup closes the explicit launched `instance_id` through
+`manage_instance`. Multiplayer paths are temporarily skipped because of a known
 Roblox StudioTestService regression. It restores the original plugin files
 afterward.
 
@@ -52,9 +54,10 @@ RSMCP_E2E_CLOSE_ALL_STUDIO=1 npm run test:studio:tools
 ## Release E2E: auto-install + Studio restart
 
 `tests/auto-install-plugin-e2e.mjs` is a destructive release verification that
-closes Roblox Studio, installs the main and inspector plugins, launches Studio,
-checks version/variant metadata, verifies mismatch warnings, and restores the
-original plugin files.
+requires Studio to be closed first, installs the main and inspector plugins,
+launches Studio through `manage_instance`, checks version/variant metadata,
+verifies mismatch warnings, closes the explicit launched `instance_id`, and
+restores the original plugin files.
 
 ```bash
 RSMCP_E2E_CLOSE_ALL_STUDIO=1 npm run test:e2e:auto-install
@@ -62,8 +65,9 @@ RSMCP_E2E_CLOSE_ALL_STUDIO=1 npm run test:e2e:auto-install
 
 The E2E targets published `@latest` first. If `@latest` does not yet include the
 new auto-install behavior, it falls back to a local packed tarball and prints
-`artifactSource: local-pack`. It requires port `58741` to be free before it
-starts and refuses to close Studio unless `RSMCP_E2E_CLOSE_ALL_STUDIO=1` is set.
+`artifactSource: local-pack`. It requires port `58741` to be free and no Studio
+windows to be open before it starts. The environment variable is still required
+as an explicit opt-in for launching and closing Studio.
 
 Studio lifecycle helpers are available directly:
 
@@ -88,7 +92,7 @@ node scripts/studio-lifecycle.mjs wait-connected --variant main --version <expec
 
 ## Lifecycle and cleanup
 
-- Most tests call `start_playtest` once at the top and `stop_playtest` in a
+- Most tests call `solo_playtest action=start` once at the top and `solo_playtest action=stop` in a
   `finally` block. Multiplayer lifecycle coverage is temporarily skipped.
 - Tests do not modify the place's persistent state — they only print, eval,
   and read from the runtime log buffer.

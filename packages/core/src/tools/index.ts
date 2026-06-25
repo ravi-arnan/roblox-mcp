@@ -1,8 +1,9 @@
 import { StudioHttpClient } from './studio-client.js';
-import { BridgeService, RoutingFailure } from '../bridge-service.js';
+import { BridgeService, RoutingFailure, type PublicPluginInstance } from '../bridge-service.js';
 import { runBuildExecutor } from './build-executor.js';
 import { OpenCloudClient } from '../opencloud-client.js';
 import { RobloxCookieClient } from '../roblox-cookie-client.js';
+import { StudioInstanceManager, type ManagedStudioInstance, type StudioLaunchSource } from '../studio-instance-manager.js';
 import { rgbaToJpeg } from '../jpeg-encoder.js';
 import { rgbaToPng } from '../png-encoder.js';
 import * as fs from 'fs';
@@ -501,12 +502,37 @@ export class RobloxStudioTools {
   private bridge: BridgeService;
   private openCloudClient: OpenCloudClient;
   private cookieClient: RobloxCookieClient;
+  private instanceManager: StudioInstanceManager;
 
   constructor(bridge: BridgeService) {
     this.client = new StudioHttpClient(bridge);
     this.bridge = bridge;
     this.openCloudClient = new OpenCloudClient();
     this.cookieClient = new RobloxCookieClient();
+    this.instanceManager = new StudioInstanceManager();
+  }
+
+  private _textResult(body: Record<string, unknown>) {
+    return { content: [{ type: 'text', text: JSON.stringify(body) }] };
+  }
+
+  private _parseTextResult(result: any): Record<string, any> {
+    const text = result?.content?.[0]?.text;
+    if (typeof text !== 'string') return {};
+    try {
+      const parsed = JSON.parse(text);
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+
+  private _briefRoles(instanceId: string, equivalentInstances = false): { roles: string[]; runtimeRoles: string[] } {
+    const roles = equivalentInstances ? this._rolesForEquivalentInstances(instanceId) : this._rolesForInstance(instanceId);
+    return {
+      roles,
+      runtimeRoles: roles.filter((role) => role === 'server' || /^client-\d+$/.test(role)),
+    };
   }
 
   // Resolve (instance_id, target-role) → concrete (instanceId, role) and
@@ -2281,12 +2307,335 @@ export class RobloxStudioTools {
     return { content: [{ type: 'text', text: JSON.stringify(body) }] };
   }
 
-  async startPlaytest(mode: string, numPlayers?: number, instance_id?: string) {
+  private _positiveInteger(value: unknown, name: string): number {
+    if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+      throw new Error(`${name} must be a positive number.`);
+    }
+    return Math.trunc(value);
+  }
+
+  private _optionalPositiveInteger(value: unknown, name: string): number | undefined {
+    if (value === undefined || value === null) return undefined;
+    return this._positiveInteger(value, name);
+  }
+
+  private _publicInstanceKey(instance: PublicPluginInstance): string {
+    return `${instance.instanceId}:${instance.role}:${instance.connectedAt}`;
+  }
+
+  private _isLatestPublishedPlaceOpen(placeId: number): boolean {
+    const publishedInstanceId = `place:${placeId}`;
+    return this.bridge.getPublicInstances().some((instance) =>
+      instance.placeId === placeId || instance.instanceId === publishedInstanceId,
+    ) || this.instanceManager.list().some((record) =>
+      record.closedAt === undefined &&
+      record.source === 'published_place' &&
+      record.placeId === placeId,
+    );
+  }
+
+  private async _deriveUniverseId(placeId: number): Promise<number> {
+    const response = await fetch(`https://apis.roblox.com/universes/v1/places/${placeId}/universe`);
+    if (!response.ok) {
+      const body = await response.text().catch(() => '');
+      throw new Error(`Could not derive universe_id for place ${placeId} (${response.status}): ${body}`);
+    }
+    const data = await response.json() as { universeId?: number };
+    if (typeof data.universeId !== 'number' || !Number.isFinite(data.universeId)) {
+      throw new Error(`Could not derive universe_id for place ${placeId}.`);
+    }
+    return Math.trunc(data.universeId);
+  }
+
+  private async _waitForManagedEditConnection(
+    record: ManagedStudioInstance,
+    beforeKeys: Set<string>,
+    timeoutMs: number,
+  ): Promise<PublicPluginInstance | undefined> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const candidates = this.bridge.getPublicInstances()
+        .filter((instance) => instance.role === 'edit')
+        .filter((instance) => !beforeKeys.has(this._publicInstanceKey(instance)))
+        .filter((instance) => instance.connectedAt >= record.launchedAt - 1000)
+        .filter((instance) => {
+          if (record.source === 'published_place') {
+            return record.placeId !== undefined && instance.placeId === record.placeId;
+          }
+          return true;
+        })
+        .sort((a, b) => b.connectedAt - a.connectedAt);
+
+      if (candidates[0]) return candidates[0];
+      await sleep(500);
+    }
+    return undefined;
+  }
+
+  private _managedStatus(record: ManagedStudioInstance): Record<string, unknown> {
+    const connected = record.instanceId
+      ? this.bridge.getPublicInstances().filter((instance) => instance.instanceId === record.instanceId)
+      : [];
+    return {
+      instance_id: record.instanceId,
+      source: record.source,
+      place_id: record.placeId,
+      place_version: record.placeVersion,
+      connected: connected.length > 0,
+      roles: connected.map((instance) => instance.role).sort(),
+    };
+  }
+
+  private _versionNumberFromPath(pathValue: string): number | undefined {
+    const match = pathValue.match(/\/versions\/(\d+)$/);
+    return match ? Number(match[1]) : undefined;
+  }
+
+  async manageInstance(request: Record<string, unknown>) {
+    const action = request.action;
+    const instance_id = typeof request.instance_id === 'string' ? request.instance_id : undefined;
+
+    if (
+      action !== 'launch' &&
+      action !== 'close' &&
+      action !== 'status' &&
+      action !== 'list_place_versions'
+    ) {
+      throw new Error('manage_instance requires action=launch|close|status|list_place_versions');
+    }
+
+    if (action === 'list_place_versions') {
+      if (!this.openCloudClient.hasApiKey()) {
+        return this._textResult({
+          error: 'ROBLOX_OPEN_CLOUD_API_KEY is required to list place versions.',
+        });
+      }
+      const placeId = this._positiveInteger(request.place_id, 'place_id');
+      const rawMaxPageSize = this._optionalPositiveInteger(request.max_page_size, 'max_page_size') ?? 10;
+      const maxPageSize = Math.max(1, Math.min(50, rawMaxPageSize));
+      const pageToken = typeof request.page_token === 'string' ? request.page_token : undefined;
+      const response = await this.openCloudClient.listAssetVersions(placeId, maxPageSize, pageToken);
+      const body: Record<string, unknown> = {
+        versions: (response.assetVersions ?? []).map((version) => ({
+          version: this._versionNumberFromPath(version.path),
+          created_at: version.createTime,
+          path: version.path,
+          moderation_state: version.moderationResult?.moderationState,
+        })),
+      };
+      if (response.nextPageToken) body.next_page_token = response.nextPageToken;
+      return this._textResult(body);
+    }
+
+    if (action === 'status') {
+      if (instance_id) {
+        const record = this.instanceManager.get(instance_id);
+        const connected = this.bridge.getPublicInstances().filter((instance) => instance.instanceId === instance_id);
+        if (!record && connected.length === 0) {
+          return this._textResult({ error: 'Instance is not connected or managed.', instance_id });
+        }
+        return this._textResult({
+          instance_id,
+          managed: !!record,
+          source: record?.source,
+          place_id: record?.placeId ?? connected[0]?.placeId,
+          place_version: record?.placeVersion,
+          roles: connected.map((instance) => instance.role).sort(),
+        });
+      }
+      return this._textResult({
+        managed: this.instanceManager.list()
+          .filter((record) => record.closedAt === undefined)
+          .map((record) => this._managedStatus(record)),
+        connected: this.bridge.getPublicInstances().map((instance) => ({
+          instance_id: instance.instanceId,
+          role: instance.role,
+          place_id: instance.placeId,
+          place_name: instance.placeName,
+        })),
+      });
+    }
+
+    if (action === 'close') {
+      let record: ManagedStudioInstance | undefined;
+      if (instance_id) {
+        record = this.instanceManager.get(instance_id);
+        if (!record) {
+          const connected = this.bridge.getPublicInstances().filter((instance) => instance.instanceId === instance_id);
+          const edit = connected.find((instance) => instance.role === 'edit');
+          if (!edit) {
+            return this._textResult({
+              error: 'Instance is not connected or managed.',
+              instance_id,
+            });
+          }
+          try {
+            this.instanceManager.closeConnectedInstance(edit);
+          } catch (error) {
+            return this._textResult({
+              error: error instanceof Error ? error.message : String(error),
+              instance_id,
+            });
+          }
+          this.bridge.unregisterInstanceId(instance_id);
+          return this._textResult({
+            instance_id,
+            message: 'Studio instance closed.',
+          });
+        }
+      } else {
+        const active = this.instanceManager.list().filter((entry) => entry.closedAt === undefined);
+        if (active.length === 0) {
+          return this._textResult({ message: 'No managed Studio instances are active.' });
+        }
+        if (active.length > 1) {
+          return this._textResult({
+            error: 'instance_id is required because multiple managed Studio instances are active.',
+            managed: active.map((entry) => this._managedStatus(entry)),
+          });
+        }
+        record = active[0];
+      }
+
+      this.instanceManager.close(record);
+      if (record.instanceId) this.bridge.unregisterInstanceId(record.instanceId);
+      return this._textResult({
+        instance_id: record.instanceId,
+        message: 'Studio instance closed.',
+      });
+    }
+
+    const source = request.source;
+    if (
+      source !== 'baseplate' &&
+      source !== 'local_file' &&
+      source !== 'published_place' &&
+      source !== 'place_revision'
+    ) {
+      throw new Error('manage_instance action=launch requires source=baseplate|local_file|published_place|place_revision');
+    }
+
+    const launchSource = source as StudioLaunchSource;
+    const placeId = launchSource === 'published_place' || launchSource === 'place_revision'
+      ? this._positiveInteger(request.place_id, 'place_id')
+      : this._optionalPositiveInteger(request.place_id, 'place_id');
+    const placeVersion = launchSource === 'place_revision'
+      ? this._positiveInteger(request.place_version, 'place_version')
+      : this._optionalPositiveInteger(request.place_version, 'place_version');
+    const localPlaceFile = typeof request.local_place_file === 'string' ? request.local_place_file : undefined;
+
+    if (launchSource === 'published_place' && placeId !== undefined && this._isLatestPublishedPlaceOpen(placeId)) {
+      return this._textResult({
+        error: 'Place is already open.',
+        message: `place_id ${placeId} is already connected. Use the existing instance or launch a specific place_revision.`,
+      });
+    }
+
+    const universeId = launchSource === 'published_place' || launchSource === 'place_revision'
+      ? this._optionalPositiveInteger(request.universe_id, 'universe_id') ?? await this._deriveUniverseId(placeId as number)
+      : this._optionalPositiveInteger(request.universe_id, 'universe_id');
+    const waitForConnection = request.wait_for_connection !== false;
+    const timeoutMs = this._optionalPositiveInteger(request.timeout_ms, 'timeout_ms') ?? 120000;
+    const beforeKeys = new Set(this.bridge.getPublicInstances().map((instance) => this._publicInstanceKey(instance)));
+
+    const record = await this.instanceManager.launch({
+      source: launchSource,
+      localPlaceFile,
+      placeId,
+      universeId,
+      placeVersion,
+    });
+
+    if (!waitForConnection) {
+      return this._textResult({ message: 'Studio launch requested.' });
+    }
+
+    const connected = await this._waitForManagedEditConnection(record, beforeKeys, timeoutMs);
+    if (!connected) {
+      try {
+        this.instanceManager.close(record);
+      } catch {
+        // Best effort cleanup; the useful error is the connection timeout.
+      }
+      return this._textResult({
+        error: 'Studio launched, but the MCP plugin did not connect before timeout.',
+      });
+    }
+
+    this.instanceManager.attachInstanceId(record, connected.instanceId);
+    return this._textResult({
+      instance_id: connected.instanceId,
+      message: launchSource === 'place_revision'
+        ? `Studio opened place revision ${placeVersion}.`
+        : 'Studio opened.',
+    });
+  }
+
+  async soloPlaytest(action: string, mode?: string, timeout?: number, instance_id?: string) {
+    if (action !== 'start' && action !== 'stop' && action !== 'status') {
+      throw new Error('solo_playtest requires action=start|stop|status');
+    }
+
+    if (action === 'status') {
+      const instanceId = this._resolveInstanceIdOnly(instance_id);
+      const { roles, runtimeRoles } = this._briefRoles(instanceId, true);
+      return this._textResult({
+        success: true,
+        action,
+        running: runtimeRoles.length > 0,
+        roles,
+      });
+    }
+
+    if (action === 'start') {
+      if (mode !== 'play' && mode !== 'run') {
+        throw new Error('solo_playtest action=start requires mode=play|run');
+      }
+      const body = this._parseTextResult(await this.startPlaytest(mode, undefined, instance_id, timeout));
+      if (body.success === true && body.runtimeReady !== false) {
+        return this._textResult({
+          success: true,
+          action,
+          message: 'Playtest started.',
+          roles: Array.isArray(body.roles) ? body.roles : undefined,
+        });
+      }
+      return this._textResult({
+        success: false,
+        action,
+        error: body.error ?? 'start_failed',
+        message: body.success === true
+          ? 'Playtest did not become ready before timeout.'
+          : body.message ?? 'Playtest did not start.',
+        roles: Array.isArray(body.roles) ? body.roles : undefined,
+      });
+    }
+
+    const body = this._parseTextResult(await this.stopPlaytest(instance_id, timeout));
+    if (body.success === true && body.runtimeStopped !== false) {
+      return this._textResult({
+        success: true,
+        action,
+        message: 'Playtest stopped.',
+      });
+    }
+    return this._textResult({
+      success: false,
+      action,
+      error: body.error ?? 'stop_failed',
+      message: body.message ?? 'Playtest did not stop.',
+      roles: Array.isArray(body.roles) ? body.roles : undefined,
+      requiresBuiltInMcp: body.requiresBuiltInMcp === true ? true : undefined,
+      recoveryHint: typeof body.recoveryHint === 'string' ? body.recoveryHint : undefined,
+    });
+  }
+
+  async startPlaytest(mode: string, numPlayers?: number, instance_id?: string, timeout = 60) {
     if (mode !== 'play' && mode !== 'run') {
       throw new Error('mode must be "play" or "run"');
     }
     if (numPlayers !== undefined) {
-      throw new Error('start_playtest is single-player only. Use multiplayer_test_start for multi-client StudioTestService sessions.');
+      throw new Error('start_playtest is single-player only. Use multiplayer_playtest action="start" for multi-client StudioTestService sessions.');
     }
     const data: Record<string, unknown> = { mode };
     const startedAt = Date.now();
@@ -2329,7 +2678,7 @@ export class RobloxStudioTools {
     let wait: { ok: boolean; roles: string[]; timedOut: boolean } | undefined;
     if (response?.success === true) {
       const requiredRoles = mode === 'play' ? ['server', 'client-1'] : ['server'];
-      wait = await this._waitForRuntimeRolesFresh(resolved.targetInstanceId, startedAt, requiredRoles, 60, true);
+      wait = await this._waitForRuntimeRolesFresh(resolved.targetInstanceId, startedAt, requiredRoles, timeout, true);
     }
     const body = wait
       ? {
@@ -2349,7 +2698,7 @@ export class RobloxStudioTools {
     };
   }
 
-  async stopPlaytest(instance_id?: string) {
+  async stopPlaytest(instance_id?: string, timeout = 15) {
     // The edit DM's stopPlaytest handler writes a plugin:SetSetting request
     // that StopPlayMonitor reads from inside the play-server DM (the only DM where
     // StudioTestService:EndTest is legal). No edit-proxy peer registration is
@@ -2370,7 +2719,7 @@ export class RobloxStudioTools {
     }
     let wait: { ok: boolean; roles: string[]; timedOut: boolean } | undefined;
     if (response?.success === true) {
-      wait = await this._waitForRuntimeRoles(instanceId, { noRuntime: true }, 15, true);
+      wait = await this._waitForRuntimeRoles(instanceId, { noRuntime: true }, timeout, true);
     } else if (this._runtimeTargetsForEquivalentInstances(instanceId).length > 0) {
       wait = {
         ok: false,
@@ -2522,6 +2871,119 @@ export class RobloxStudioTools {
       await sleep(250);
     }
     return { ok: false, roles: this._rolesForInstance(instanceId), timedOut: true };
+  }
+
+  async multiplayerPlaytest(
+    action: string,
+    numPlayers?: number,
+    target?: string,
+    testArgs?: unknown,
+    value?: unknown,
+    timeout?: number,
+    instance_id?: string,
+  ) {
+    if (
+      action !== 'start' &&
+      action !== 'status' &&
+      action !== 'add_players' &&
+      action !== 'leave_client' &&
+      action !== 'end'
+    ) {
+      throw new Error('multiplayer_playtest requires action=start|status|add_players|leave_client|end');
+    }
+
+    const briefState = async (instanceId?: string) => {
+      const state = await this._buildMultiplayerState(this._resolveInstanceIdOnly(instanceId));
+      return {
+        phase: state.phase,
+        roles: Array.isArray(state.peers) ? state.peers.map((peer: any) => peer.role).filter((role: unknown) => typeof role === 'string') : [],
+        clientRoles: Array.isArray(state.clientRoles) ? state.clientRoles : [],
+        playerCount: typeof state.playerCount === 'number' ? state.playerCount : undefined,
+        error: typeof state.error === 'string' ? state.error : undefined,
+      };
+    };
+
+    if (action === 'status') {
+      return this._textResult({
+        success: true,
+        action,
+        ...(await briefState(instance_id)),
+      });
+    }
+
+    if (action === 'start') {
+      const body = this._parseTextResult(await this.multiplayerTestStart(numPlayers as number, testArgs, timeout, instance_id));
+      const state = body.state && typeof body.state === 'object' ? body.state as Record<string, any> : {};
+      const success = body.success === true && body.ready === true;
+      return this._textResult(success ? {
+        success: true,
+        action,
+        message: 'Multiplayer playtest started.',
+        roles: Array.isArray(body.roles) ? body.roles : undefined,
+        clientRoles: Array.isArray(state.clientRoles) ? state.clientRoles : undefined,
+        playerCount: typeof state.playerCount === 'number' ? state.playerCount : undefined,
+      } : {
+        success: false,
+        action,
+        error: body.error ?? body.wait?.error ?? 'start_failed',
+        message: body.success === true
+          ? 'Multiplayer playtest did not become ready before timeout.'
+          : body.message ?? 'Multiplayer playtest did not start.',
+        roles: Array.isArray(body.roles) ? body.roles : undefined,
+      });
+    }
+
+    if (action === 'add_players') {
+      const body = this._parseTextResult(await this.multiplayerTestAddPlayers(numPlayers as number, timeout, instance_id));
+      const state = body.state && typeof body.state === 'object' ? body.state as Record<string, any> : {};
+      const success = body.success === true && body.ready === true;
+      return this._textResult(success ? {
+        success: true,
+        action,
+        message: 'Players added.',
+        roles: Array.isArray(body.roles) ? body.roles : undefined,
+        clientRoles: Array.isArray(state.clientRoles) ? state.clientRoles : undefined,
+        playerCount: typeof state.playerCount === 'number' ? state.playerCount : undefined,
+      } : {
+        success: false,
+        action,
+        error: body.error ?? 'add_players_failed',
+        message: body.success === true
+          ? 'Players did not finish joining before timeout.'
+          : body.message ?? 'Players were not added.',
+        roles: Array.isArray(body.roles) ? body.roles : undefined,
+      });
+    }
+
+    if (action === 'leave_client') {
+      const body = this._parseTextResult(await this.multiplayerTestLeaveClient(target ?? 'client-1', timeout, instance_id));
+      return this._textResult(body.success === true && body.left === true ? {
+        success: true,
+        action,
+        message: 'Client left.',
+        roles: Array.isArray(body.roles) ? body.roles : undefined,
+      } : {
+        success: false,
+        action,
+        error: body.error ?? 'leave_client_failed',
+        message: body.message ?? 'Client did not leave.',
+        roles: Array.isArray(body.roles) ? body.roles : undefined,
+      });
+    }
+
+    const body = this._parseTextResult(await this.multiplayerTestEnd(value, timeout, instance_id));
+    return this._textResult(body.success === true && body.ended === true ? {
+      success: true,
+      action,
+      message: 'Multiplayer playtest ended.',
+    } : {
+      success: false,
+      action,
+      error: body.error ?? 'end_failed',
+      message: body.message ?? 'Multiplayer playtest did not end.',
+      roles: Array.isArray(body.roles) ? body.roles : undefined,
+      editDone: body.editDone === false ? false : undefined,
+    });
   }
 
   async multiplayerTestStart(numPlayers: number, testArgs?: unknown, timeout?: number, instance_id?: string) {
@@ -3898,7 +4360,7 @@ export class RobloxStudioTools {
       ) {
         text =
           'Screenshot capture reached the multiplayer client, but Roblox returned a temporary screenshot texture ' +
-          'that the edit peer cannot read in StudioTestService multiplayer sessions. Regular start_playtest capture ' +
+          'that the edit peer cannot read in StudioTestService multiplayer sessions. Regular solo_playtest capture ' +
           'works because the temporary rbxtemp:// handle is readable from the edit process; multiplayer client handles ' +
           `appear to be scoped to the client process. Raw error: ${response.error}`;
       }

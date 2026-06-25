@@ -103,6 +103,26 @@ export interface AssetOperationResponse {
   };
 }
 
+export interface AssetVersionInfo {
+  path: string;
+  createTime?: string;
+  creationContext?: {
+    creator?: {
+      userId?: string;
+      groupId?: string;
+    };
+  };
+  moderationResult?: {
+    moderationState?: string;
+  };
+  published?: boolean;
+}
+
+export interface AssetVersionsResponse {
+  assetVersions: AssetVersionInfo[];
+  nextPageToken?: string;
+}
+
 export class OpenCloudClient {
   private apiKey: string;
   private baseUrl: string;
@@ -212,6 +232,19 @@ export class OpenCloudClient {
 
   async getAssetDetails(assetId: number): Promise<CreatorStoreAsset> {
     return this.request<CreatorStoreAsset>(`/toolbox-service/v2/assets/${assetId}`);
+  }
+
+  async listAssetVersions(
+    assetId: number | string,
+    maxPageSize = 10,
+    pageToken?: string,
+  ): Promise<AssetVersionsResponse> {
+    return this.request<AssetVersionsResponse>(`/assets/v1/assets/${assetId}/versions`, {
+      params: {
+        maxPageSize,
+        pageToken,
+      },
+    });
   }
 
   async getAssetThumbnail(
