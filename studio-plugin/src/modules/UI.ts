@@ -1,7 +1,6 @@
 import { TweenService } from "@rbxts/services";
 import State from "./State";
 import ServerUrlSettings from "./ServerUrlSettings";
-import { Connection } from "../types";
 
 interface UIElements {
 	screenGui: DockWidgetPluginGui;
@@ -24,7 +23,6 @@ interface UIElements {
 	troubleshootLabel: TextLabel;
 	updateBanner: Frame;
 	updateBannerText: TextLabel;
-	tabBar: Frame;
 }
 
 let elements: UIElements = undefined!;
@@ -65,14 +63,6 @@ function updateToolbarIcon() {
 	}
 }
 
-interface TabButton {
-	frame: Frame;
-	label: TextLabel;
-	dot: Frame;
-	closeBtn: TextButton;
-}
-let tabButtons: Map<number, TabButton> = new Map();
-
 const TWEEN_QUICK = new TweenInfo(0.15, Enum.EasingStyle.Quad, Enum.EasingDirection.Out);
 
 function tweenProp(instance: Instance, props: Record<string, unknown>) {
@@ -83,8 +73,8 @@ function showBanner(kind: string, text: string) {
 	activeBannerKind = kind;
 	elements.updateBannerText.Text = text;
 	elements.updateBanner.Visible = true;
-	elements.contentFrame.Position = new UDim2(0, 8, 0, 92);
-	elements.contentFrame.Size = new UDim2(1, -16, 1, -100);
+	elements.contentFrame.Position = new UDim2(0, 8, 0, 70);
+	elements.contentFrame.Size = new UDim2(1, -16, 1, -78);
 }
 
 function hideBanner(kind?: string) {
@@ -92,8 +82,8 @@ function hideBanner(kind?: string) {
 	activeBannerKind = undefined;
 	elements.updateBanner.Visible = false;
 	elements.updateBannerText.Text = "";
-	elements.contentFrame.Position = new UDim2(0, 8, 0, 66);
-	elements.contentFrame.Size = new UDim2(1, -16, 1, -74);
+	elements.contentFrame.Position = new UDim2(0, 8, 0, 44);
+	elements.contentFrame.Size = new UDim2(1, -16, 1, -52);
 }
 
 const C = {
@@ -113,14 +103,6 @@ const C = {
 };
 
 const CORNER = new UDim(0, 4);
-
-function getStatusDotColor(connIndex: number): Color3 {
-	const conn = State.getConnection(connIndex);
-	if (!conn || !conn.isActive) return C.red;
-	if (conn.consecutiveFailures >= conn.maxFailuresBeforeError) return C.red;
-	if (conn.lastHttpOk) return C.green;
-	return C.yellow;
-}
 
 function setButtonConnect(btn: TextButton, stroke: UIStroke) {
 	btn.Text = "Connect";
@@ -146,131 +128,6 @@ function startPulseAnimation() {
 	elements.statusPulse.Size = new UDim2(0, 10, 0, 10);
 	elements.statusPulse.Position = new UDim2(0, 0, 0, 0);
 	elements.statusPulse.BackgroundTransparency = 0.7;
-}
-
-let refreshTabBar: () => void;
-let switchToTab: (index: number) => void;
-
-function createTabButton(connIndex: number) {
-	const conn = State.getConnection(connIndex);
-	if (!conn) return;
-
-	const isActive = connIndex === State.getActiveTabIndex();
-
-	const tabFrame = new Instance("Frame");
-	tabFrame.Size = new UDim2(0, 58, 1, -6);
-	tabFrame.Position = new UDim2(0, 0, 0, 3);
-	tabFrame.BackgroundColor3 = isActive ? C.surface : C.bg;
-	tabFrame.BackgroundTransparency = isActive ? 0 : 0.5;
-	tabFrame.BorderSizePixel = 0;
-	tabFrame.LayoutOrder = connIndex;
-
-	const tabCorner = new Instance("UICorner");
-	tabCorner.CornerRadius = new UDim(0, 3);
-	tabCorner.Parent = tabFrame;
-
-	const dot = new Instance("Frame");
-	dot.Size = new UDim2(0, 5, 0, 5);
-	dot.Position = new UDim2(0, 6, 0.5, -2);
-	dot.BackgroundColor3 = getStatusDotColor(connIndex);
-	dot.BorderSizePixel = 0;
-	dot.Parent = tabFrame;
-
-	const dotCorner = new Instance("UICorner");
-	dotCorner.CornerRadius = new UDim(1, 0);
-	dotCorner.Parent = dot;
-
-	const label = new Instance("TextLabel");
-	label.Size = new UDim2(1, -26, 1, 0);
-	label.Position = new UDim2(0, 14, 0, 0);
-	label.BackgroundTransparency = 1;
-	label.Text = tostring(conn.port);
-	label.TextColor3 = isActive ? C.label : C.muted;
-	label.TextSize = 10;
-	label.Font = Enum.Font.GothamMedium;
-	label.TextXAlignment = Enum.TextXAlignment.Left;
-	label.TextTruncate = Enum.TextTruncate.AtEnd;
-	label.Parent = tabFrame;
-
-	const closeBtn = new Instance("TextButton");
-	closeBtn.Size = new UDim2(0, 12, 0, 12);
-	closeBtn.Position = new UDim2(1, -15, 0.5, -6);
-	closeBtn.BackgroundTransparency = 1;
-	closeBtn.Text = "x";
-	closeBtn.TextColor3 = C.muted;
-	closeBtn.TextSize = 8;
-	closeBtn.Font = Enum.Font.GothamBold;
-	closeBtn.Parent = tabFrame;
-
-	const clickBtn = new Instance("TextButton");
-	clickBtn.Size = new UDim2(1, -14, 1, 0);
-	clickBtn.Position = new UDim2(0, 0, 0, 0);
-	clickBtn.BackgroundTransparency = 1;
-	clickBtn.Text = "";
-	clickBtn.Parent = tabFrame;
-
-	clickBtn.Activated.Connect(() => switchToTab(connIndex));
-	closeBtn.Activated.Connect(() => {
-		const c = State.getConnection(connIndex);
-		if (c && c.isActive) return;
-		if (State.getConnections().size() <= 1) return;
-		State.removeConnection(connIndex);
-		refreshTabBar();
-		switchToTab(State.getActiveTabIndex());
-	});
-
-	tabFrame.Parent = elements.tabBar;
-	tabButtons.set(connIndex, { frame: tabFrame, label, dot, closeBtn });
-}
-
-refreshTabBar = () => {
-	tabButtons.forEach((tb) => {
-		if (tb.frame) tb.frame.Destroy();
-	});
-	tabButtons = new Map();
-	for (let i = 0; i < State.getConnections().size(); i++) {
-		createTabButton(i);
-	}
-	tabButtons.forEach((tb, i) => {
-		const active = i === State.getActiveTabIndex();
-		if (tb.frame) {
-			tb.frame.BackgroundColor3 = active ? C.surface : C.bg;
-			tb.frame.BackgroundTransparency = active ? 0 : 0.5;
-		}
-		if (tb.label) tb.label.TextColor3 = active ? C.label : C.muted;
-	});
-};
-
-switchToTab = (index: number) => {
-	if (index < 0 || index >= State.getConnections().size()) return;
-	State.setActiveTabIndex(index);
-	const conn = State.getActiveConnection();
-
-	tabButtons.forEach((tb, i) => {
-		const active = i === index;
-		if (tb.frame) {
-			tweenProp(tb.frame, { BackgroundColor3: active ? C.surface : C.bg, BackgroundTransparency: active ? 0 : 0.5 });
-		}
-		if (tb.label) tb.label.TextColor3 = active ? C.label : C.muted;
-	});
-
-	elements.urlInput.Text = conn.serverUrl;
-	updateUIState();
-};
-
-function updateTabDot(connIndex: number) {
-	const tb = tabButtons.get(connIndex);
-	if (tb && tb.dot) {
-		tb.dot.BackgroundColor3 = getStatusDotColor(connIndex);
-	}
-}
-
-function updateTabLabel(connIndex: number) {
-	const conn = State.getConnection(connIndex);
-	const tb = tabButtons.get(connIndex);
-	if (conn && tb && tb.label) {
-		tb.label.Text = tostring(conn.port);
-	}
 }
 
 function init(pluginRef: Plugin) {
@@ -366,54 +223,9 @@ function init(pluginRef: Plugin) {
 	statusText.TextColor3 = C.white;
 	statusText.Parent = statusContainer;
 
-	const tabBar = new Instance("Frame");
-	tabBar.Size = new UDim2(1, 0, 0, 22);
-	tabBar.Position = new UDim2(0, 0, 0, 40);
-	tabBar.BackgroundColor3 = C.bg;
-	tabBar.BorderSizePixel = 0;
-	tabBar.Parent = mainFrame;
-
-	const tabBarLayout = new Instance("UIListLayout");
-	tabBarLayout.FillDirection = Enum.FillDirection.Horizontal;
-	tabBarLayout.Padding = new UDim(0, 2);
-	tabBarLayout.SortOrder = Enum.SortOrder.LayoutOrder;
-	tabBarLayout.VerticalAlignment = Enum.VerticalAlignment.Center;
-	tabBarLayout.Parent = tabBar;
-
-	const tabBarPadding = new Instance("UIPadding");
-	tabBarPadding.PaddingLeft = new UDim(0, 8);
-	tabBarPadding.PaddingRight = new UDim(0, 8);
-	tabBarPadding.Parent = tabBar;
-
-	const addTabBtn = new Instance("TextButton");
-	addTabBtn.Size = new UDim2(0, 18, 0, 18);
-	addTabBtn.BackgroundColor3 = C.surface;
-	addTabBtn.BackgroundTransparency = 0.5;
-	addTabBtn.BorderSizePixel = 0;
-	addTabBtn.Text = "+";
-	addTabBtn.TextColor3 = C.muted;
-	addTabBtn.TextSize = 12;
-	addTabBtn.Font = Enum.Font.GothamMedium;
-	addTabBtn.LayoutOrder = 999;
-	addTabBtn.Parent = tabBar;
-
-	const addTabCorner = new Instance("UICorner");
-	addTabCorner.CornerRadius = new UDim(0, 3);
-	addTabCorner.Parent = addTabBtn;
-
-	addTabBtn.MouseEnter.Connect(() => tweenProp(addTabBtn, { BackgroundTransparency: 0, BackgroundColor3: C.subtle }));
-	addTabBtn.MouseLeave.Connect(() => tweenProp(addTabBtn, { BackgroundTransparency: 0.5, BackgroundColor3: C.surface }));
-	addTabBtn.Activated.Connect(() => {
-		const newIndex = State.addConnection();
-		if (newIndex !== undefined) {
-			refreshTabBar();
-			switchToTab(newIndex);
-		}
-	});
-
 	const updateBanner = new Instance("Frame");
 	updateBanner.Size = new UDim2(1, -16, 0, 24);
-	updateBanner.Position = new UDim2(0, 8, 0, 64);
+	updateBanner.Position = new UDim2(0, 8, 0, 42);
 	updateBanner.BackgroundColor3 = Color3.fromRGB(40, 32, 10);
 	updateBanner.BorderSizePixel = 0;
 	updateBanner.Visible = false;
@@ -434,7 +246,7 @@ function init(pluginRef: Plugin) {
 	updateBannerText.TextXAlignment = Enum.TextXAlignment.Left;
 	updateBannerText.Parent = updateBanner;
 
-	const contentY = 66;
+	const contentY = 44;
 	const contentFrame = new Instance("ScrollingFrame");
 	contentFrame.Size = new UDim2(1, -16, 1, -(contentY + 8));
 	contentFrame.Position = new UDim2(0, 8, 0, contentY);
@@ -505,7 +317,6 @@ function init(pluginRef: Plugin) {
 		urlInput.Text = normalizedUrl;
 		const port = ServerUrlSettings.extractPort(conn.serverUrl);
 		if (port !== undefined) conn.port = port;
-		updateTabLabel(State.getActiveTabIndex());
 	});
 
 	const statusRow = new Instance("Frame");
@@ -647,10 +458,8 @@ function init(pluginRef: Plugin) {
 		screenGui, mainFrame, contentFrame, statusLabel, detailStatusLabel,
 		statusIndicator, statusPulse, statusText, connectButton, connectStroke,
 		urlInput, step1Dot, step1Label, step2Dot, step2Label, step3Dot, step3Label,
-		troubleshootLabel, updateBanner, updateBannerText, tabBar,
+		troubleshootLabel, updateBanner, updateBannerText,
 	};
-
-	refreshTabBar();
 }
 
 function updateUIState() {
@@ -778,8 +587,6 @@ export = {
 	elements: undefined as unknown as UIElements,
 	init,
 	updateUIState,
-	updateTabDot,
-	updateTabLabel,
 	stopPulseAnimation,
 	startPulseAnimation,
 	setToolbarButton,

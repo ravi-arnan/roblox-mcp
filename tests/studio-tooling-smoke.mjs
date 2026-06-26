@@ -3,7 +3,6 @@
 import { spawn } from 'node:child_process';
 import { createConnection } from 'node:net';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { McpClient, DIST, REPO_ROOT, assert, assertContains } from './lib/mcp-client.mjs';
@@ -15,28 +14,6 @@ import {
 const SERVER_ENV = {
   ROBLOX_STUDIO_PROXY_PROMOTION_INTERVAL_MS: '600000',
 };
-
-const PLACE_FIXTURE_XML = `<?xml version="1.0" encoding="utf-8"?>
-<roblox version="4">
-  <External>null</External>
-  <External>nil</External>
-  <Item class="Workspace" referent="RBX0">
-    <Properties>
-      <string name="Name">Workspace</string>
-    </Properties>
-  </Item>
-  <Item class="ServerStorage" referent="RBX1">
-    <Properties>
-      <string name="Name">ServerStorage</string>
-    </Properties>
-  </Item>
-  <Item class="Lighting" referent="RBX2">
-    <Properties>
-      <string name="Name">Lighting</string>
-    </Properties>
-  </Item>
-</roblox>
-`;
 
 function isPortOpen(port) {
   return new Promise((resolve) => {
@@ -84,14 +61,6 @@ function restorePluginFiles(pluginsDir, backups) {
   }
 }
 
-function createPlaceFixture(pluginsDir) {
-  const fixtureDir = path.join(path.dirname(pluginsDir), 'robloxstudio-mcp-tooling-smoke');
-  mkdirSync(fixtureDir, { recursive: true });
-  const placePath = path.join(fixtureDir, 'StudioToolingSmoke.rbxlx');
-  writeFileSync(placePath, PLACE_FIXTURE_XML, 'utf8');
-  return { fixtureDir, placePath };
-}
-
 async function waitForEditInstance(client, expectedVersion, instanceId, timeoutMs = 120000) {
   const deadline = Date.now() + timeoutMs;
   let last;
@@ -116,11 +85,10 @@ async function waitForEditInstance(client, expectedVersion, instanceId, timeoutM
   throw new Error(`No edit instance ${instanceId} connected within ${timeoutMs}ms. Last: ${JSON.stringify(last)}`);
 }
 
-async function launchManagedPlace(client, placePath) {
+async function launchManagedPlace(client) {
   const launched = await client.callTool('manage_instance', {
     action: 'launch',
-    source: 'local_file',
-    local_place_file: placePath,
+    source: 'baseplate',
     timeout_ms: 120000,
   });
   assert(!!launched.instance_id, `manage_instance launched Studio (${JSON.stringify(launched)})`);
@@ -316,7 +284,6 @@ async function main() {
   const { version } = JSON.parse(readFileSync(path.join(REPO_ROOT, 'package.json'), 'utf8'));
   const pluginsDir = resolvePluginsDir();
   const backups = backupPluginFiles(pluginsDir);
-  const { fixtureDir, placePath } = createPlaceFixture(pluginsDir);
   let client;
   let instanceId;
 
@@ -330,7 +297,7 @@ async function main() {
     await client.start();
     await client.initialize();
 
-    instanceId = await launchManagedPlace(client, placePath);
+    instanceId = await launchManagedPlace(client);
     const edit = await waitForEditInstance(client, version, instanceId);
     await runEditModeToolSmoke(client, edit.instanceId);
     await runLiveRegressionSuite();
@@ -345,7 +312,6 @@ async function main() {
       await waitPortClosed(58741).catch(() => {});
     }
     restorePluginFiles(pluginsDir, backups);
-    rmSync(fixtureDir, { recursive: true, force: true });
     const remaining = listStudioProcesses();
     if (remaining.length > 0) {
       throw new Error(`Studio processes remain after cleanup: ${JSON.stringify(remaining)}`);

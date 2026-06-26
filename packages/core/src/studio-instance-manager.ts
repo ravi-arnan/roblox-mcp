@@ -1,5 +1,5 @@
 import { execFileSync, spawn } from 'child_process';
-import { existsSync, readdirSync, readFileSync, statSync } from 'fs';
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync } from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
@@ -33,6 +33,10 @@ export interface StudioProcessInfo {
   Path?: string;
   MainWindowTitle?: string;
 }
+
+const BASEPLATE_TEMP_DIR = path.join(os.tmpdir(), 'robloxstudio-mcp-baseplates');
+const BASEPLATE_TEMP_NAME = /^Baseplate-\d+-\d+\.rbxl$/;
+const BASEPLATE_TEMPLATE_NAME = 'Baseplate.rbxl';
 
 export interface ConnectedStudioInstance {
   instanceId: string;
@@ -85,6 +89,62 @@ function toWslPath(windowsPath: string): string {
 function toStudioLaunchArg(arg: string): string {
   if (!isWsl() || !path.isAbsolute(arg) || !existsSync(arg)) return arg;
   return run('wslpath', ['-w', arg]);
+}
+
+function resolveEntrypointDir(): string | undefined {
+  const entrypoint = process.argv[1];
+  if (!entrypoint) return undefined;
+  try {
+    return path.dirname(realpathSync(entrypoint));
+  } catch {
+    return path.dirname(path.resolve(entrypoint));
+  }
+}
+
+function resolveBaseplateTemplatePath(): string {
+  const entrypointDir = resolveEntrypointDir();
+  const candidates = [
+    ...(entrypointDir ? [
+      path.join(entrypointDir, 'assets', BASEPLATE_TEMPLATE_NAME),
+      path.join(entrypointDir, '..', 'assets', BASEPLATE_TEMPLATE_NAME),
+    ] : []),
+    path.join(process.cwd(), 'packages', 'core', 'assets', BASEPLATE_TEMPLATE_NAME),
+    path.join(process.cwd(), 'packages', 'robloxstudio-mcp', 'dist', 'assets', BASEPLATE_TEMPLATE_NAME),
+    path.join(process.cwd(), 'assets', BASEPLATE_TEMPLATE_NAME),
+  ];
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) return candidate;
+  }
+  throw new Error(`Baseplate template not found. Expected ${BASEPLATE_TEMPLATE_NAME} in one of: ${candidates.join(', ')}`);
+}
+
+function createBaseplatePlaceFile(): string {
+  mkdirSync(BASEPLATE_TEMP_DIR, { recursive: true });
+  const file = path.join(BASEPLATE_TEMP_DIR, `Baseplate-${process.pid}-${Date.now()}.rbxl`);
+  copyFileSync(resolveBaseplateTemplatePath(), file);
+  return file;
+}
+
+function isGeneratedBaseplatePlaceFile(file: string): boolean {
+  const resolvedFile = path.resolve(file);
+  return path.dirname(resolvedFile) === path.resolve(BASEPLATE_TEMP_DIR) &&
+    BASEPLATE_TEMP_NAME.test(path.basename(resolvedFile));
+}
+
+export function cleanupManagedBaseplateFiles(record: Pick<ManagedStudioInstance, 'source' | 'localPlaceFile'>): void {
+  if (record.source !== 'baseplate' || !record.localPlaceFile) return;
+  if (!isGeneratedBaseplatePlaceFile(record.localPlaceFile)) return;
+
+  rmSync(record.localPlaceFile, { force: true });
+  rmSync(`${record.localPlaceFile}.lock`, { force: true });
+}
+
+function prepareStudioLaunchOptions(options: StudioLaunchOptions): StudioLaunchOptions {
+  if (options.source !== 'baseplate' || options.localPlaceFile) return options;
+  return {
+    ...options,
+    localPlaceFile: createBaseplatePlaceFile(),
+  };
 }
 
 export function resolveStudioExe(): string {
@@ -157,7 +217,7 @@ export function listStudioProcesses(): StudioProcessInfo[] {
 export function buildStudioLaunchArgs(options: StudioLaunchOptions): string[] {
   switch (options.source) {
     case 'baseplate':
-      return [];
+      return ['--task', 'EditFile', '--localPlaceFile', options.localPlaceFile ?? createBaseplatePlaceFile()];
     case 'local_file':
       if (!options.localPlaceFile) throw new Error('local_place_file is required when source="local_file".');
       return ['--task', 'EditFile', '--localPlaceFile', options.localPlaceFile];
@@ -202,9 +262,10 @@ export class StudioInstanceManager {
   }
 
   async launch(options: StudioLaunchOptions): Promise<ManagedStudioInstance> {
+    const preparedOptions = prepareStudioLaunchOptions(options);
     const before = new Set(listStudioProcesses().map((proc) => proc.Id));
     const exe = resolveStudioExe();
-    const args = buildStudioLaunchArgs(options).map(toStudioLaunchArg);
+    const args = buildStudioLaunchArgs(preparedOptions).map(toStudioLaunchArg);
     const proc = spawn(exe, args, {
       cwd: isWsl() && existsSync('/mnt/c/Windows') ? '/mnt/c/Windows' : process.cwd(),
       detached: true,
@@ -217,10 +278,10 @@ export class StudioInstanceManager {
       spawnPid: proc.pid,
       exe,
       args,
-      placeId: options.placeId,
-      universeId: options.universeId,
-      placeVersion: options.placeVersion,
-      localPlaceFile: options.localPlaceFile,
+      placeId: preparedOptions.placeId,
+      universeId: preparedOptions.universeId,
+      placeVersion: preparedOptions.placeVersion,
+      localPlaceFile: preparedOptions.localPlaceFile,
       launchedAt: Date.now(),
     };
     this.pending.add(record);
@@ -261,6 +322,7 @@ export class StudioInstanceManager {
     record.closedAt = Date.now();
     if (record.instanceId) this.managedByInstanceId.delete(record.instanceId);
     this.pending.delete(record);
+    cleanupManagedBaseplateFiles(record);
   }
 
   closeConnectedInstance(instance: ConnectedStudioInstance) {

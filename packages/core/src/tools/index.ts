@@ -4,6 +4,7 @@ import { runBuildExecutor } from './build-executor.js';
 import { OpenCloudClient } from '../opencloud-client.js';
 import { RobloxCookieClient } from '../roblox-cookie-client.js';
 import { StudioInstanceManager, type ManagedStudioInstance, type StudioLaunchSource } from '../studio-instance-manager.js';
+import { decodeImagePathToRgba, decodePngToRgba } from '../image-decode.js';
 import { rgbaToJpeg } from '../jpeg-encoder.js';
 import { rgbaToPng } from '../png-encoder.js';
 import * as fs from 'fs';
@@ -54,9 +55,13 @@ type DeviceSimulatorMatrixEntry = DeviceSimulatorSettings & {
 
 type SimulationInclude = 'network' | 'deviceSimulator' | 'both';
 
+type GenerateModelImage =
+  { kind: 'asset'; asset_id: number };
+
 const MAX_INLINE_IMAGE_BYTES = 6_000_000;
 const MAX_DEVICE_MATRIX_ENTRIES = 6;
 const MAX_NETWORK_PACKET_LOSS_PERCENT = 0.5;
+const STUDIO_ASSISTANT_SOURCE_IMAGE_LABEL = 'Studio Assistant Source Image';
 
 // Encodes the raw RGBA capture into the requested image format.
 // - 'png': lossless — sharpest text/UI, but a busy 3D scene can be large.
@@ -87,6 +92,247 @@ function sleep(ms: number): Promise<void> {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+function asRows(value: unknown): Record<string, unknown>[] {
+  return Array.isArray(value)
+    ? value.map(asRecord).filter((row): row is Record<string, unknown> => row !== undefined)
+    : [];
+}
+
+function numberField(row: Record<string, unknown> | undefined, key: string): number {
+  const value = row?.[key];
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0;
+}
+
+function stringField(row: Record<string, unknown> | undefined, key: string): string {
+  const value = row?.[key];
+  return typeof value === 'string' && value !== '' ? value : '';
+}
+
+function microProfilerDurationMs(body: Record<string, unknown> | undefined): number {
+  const analysisWindow = asRecord(body?.analysis_window);
+  const analysisDurationUs = analysisWindow?.analysis_duration_us;
+  if (typeof analysisDurationUs === 'number' && Number.isFinite(analysisDurationUs) && analysisDurationUs > 0) {
+    return analysisDurationUs / 1000;
+  }
+  const duration = body?.duration_ms;
+  return typeof duration === 'number' && Number.isFinite(duration) && duration > 0 ? duration : 1000;
+}
+
+function perSecond(totalUs: number, durationMs: number): number {
+  return durationMs > 0 ? totalUs / (durationMs / 1000) : totalUs;
+}
+
+function roundNumber(value: number): number {
+  return Math.round(value * 100) / 100;
+}
+
+function percentDelta(current: number, baseline: number): number | undefined {
+  if (baseline === 0) return current === 0 ? 0 : undefined;
+  return roundNumber(((current - baseline) / baseline) * 100);
+}
+
+function inclusiveUsField(row: Record<string, unknown> | undefined): number {
+  const inclusive = numberField(row, 'inclusive_us');
+  return inclusive !== 0 ? inclusive : numberField(row, 'total_us');
+}
+
+function rowSet(body: Record<string, unknown>, key: 'groups' | 'timers' | 'threads' | 'call_edges', fallback: string): Record<string, unknown>[] {
+  const comparisonIndex = asRecord(body.comparison_index);
+  const indexed = asRows(comparisonIndex?.[key]);
+  return indexed.length > 0 ? indexed : asRows(body[fallback]);
+}
+
+function nestedRecord(row: Record<string, unknown> | undefined, key: string): Record<string, unknown> | undefined {
+  return asRecord(row?.[key]);
+}
+
+function loadMicroProfilerBaseline(source: unknown, sourcePath: unknown): Record<string, unknown> | undefined {
+  if (source !== undefined) {
+    const inline = asRecord(source);
+    if (!inline) throw new Error('baseline must be an object when provided');
+    return inline;
+  }
+  if (sourcePath !== undefined) {
+    if (typeof sourcePath !== 'string' || sourcePath === '') {
+      throw new Error('baseline_path must be a non-empty string when provided');
+    }
+    const resolved = path.resolve(sourcePath);
+    const parsed = JSON.parse(fs.readFileSync(resolved, 'utf8')) as unknown;
+    const record = asRecord(parsed);
+    if (!record) throw new Error(`baseline_path did not contain a JSON object: ${resolved}`);
+    return record;
+  }
+  return undefined;
+}
+
+function compareMicroProfilerRows(
+  currentRows: Record<string, unknown>[],
+  baselineRows: Record<string, unknown>[],
+  currentDurationMs: number,
+  baselineDurationMs: number,
+  keyForRow: (row: Record<string, unknown>) => string,
+  labelForRow: (row: Record<string, unknown>, fallbackKey: string) => Record<string, unknown>,
+  maxRows: number,
+): Record<string, unknown>[] {
+  const currentByKey = new Map<string, Record<string, unknown>>();
+  const baselineByKey = new Map<string, Record<string, unknown>>();
+  for (const row of currentRows) {
+    const key = keyForRow(row);
+    if (key) currentByKey.set(key, row);
+  }
+  for (const row of baselineRows) {
+    const key = keyForRow(row);
+    if (key) baselineByKey.set(key, row);
+  }
+
+  const usesFullIndex = currentRows.length > 0 && baselineRows.length > 0;
+  const keys = new Set<string>([...currentByKey.keys(), ...baselineByKey.keys()]);
+  const deltas: Record<string, unknown>[] = [];
+  for (const key of keys) {
+    const current = currentByKey.get(key);
+    const baseline = baselineByKey.get(key);
+    const currentInclusiveUs = inclusiveUsField(current);
+    const baselineInclusiveUs = inclusiveUsField(baseline);
+    const currentExclusiveUs = numberField(current, 'exclusive_us');
+    const baselineExclusiveUs = numberField(baseline, 'exclusive_us');
+    const currentCount = numberField(current, 'count');
+    const baselineCount = numberField(baseline, 'count');
+    const currentUsPerS = perSecond(currentInclusiveUs, currentDurationMs);
+    const baselineUsPerS = perSecond(baselineInclusiveUs, baselineDurationMs);
+    const currentExclusiveUsPerS = perSecond(currentExclusiveUs, currentDurationMs);
+    const baselineExclusiveUsPerS = perSecond(baselineExclusiveUs, baselineDurationMs);
+    const currentCountPerS = perSecond(currentCount, currentDurationMs);
+    const baselineCountPerS = perSecond(baselineCount, baselineDurationMs);
+    const row: Record<string, unknown> = {
+      ...labelForRow(current ?? baseline!, key),
+      matched_by: 'stable_label',
+      match_confidence: 'medium',
+      current_inclusive_us: currentInclusiveUs,
+      baseline_inclusive_us: baselineInclusiveUs,
+      delta_inclusive_us: currentInclusiveUs - baselineInclusiveUs,
+      current_inclusive_us_per_s: roundNumber(currentUsPerS),
+      baseline_inclusive_us_per_s: roundNumber(baselineUsPerS),
+      delta_inclusive_us_per_s: roundNumber(currentUsPerS - baselineUsPerS),
+      current_exclusive_us: currentExclusiveUs,
+      baseline_exclusive_us: baselineExclusiveUs,
+      delta_exclusive_us: currentExclusiveUs - baselineExclusiveUs,
+      current_exclusive_us_per_s: roundNumber(currentExclusiveUsPerS),
+      baseline_exclusive_us_per_s: roundNumber(baselineExclusiveUsPerS),
+      delta_exclusive_us_per_s: roundNumber(currentExclusiveUsPerS - baselineExclusiveUsPerS),
+      current_count: currentCount,
+      baseline_count: baselineCount,
+      delta_count: currentCount - baselineCount,
+      current_count_per_s: roundNumber(currentCountPerS),
+      baseline_count_per_s: roundNumber(baselineCountPerS),
+      delta_count_per_s: roundNumber(currentCountPerS - baselineCountPerS),
+    };
+    if (!usesFullIndex) row.match_scope = 'returned_rows';
+    const pct = percentDelta(currentUsPerS, baselineUsPerS);
+    if (pct !== undefined) row.delta_pct = pct;
+    deltas.push(row);
+  }
+
+  deltas.sort((a, b) => Math.abs(numberField(b, 'delta_inclusive_us_per_s')) - Math.abs(numberField(a, 'delta_inclusive_us_per_s')));
+  return deltas.slice(0, maxRows);
+}
+
+function compareMicroProfilerCaptures(
+  current: Record<string, unknown>,
+  baseline: Record<string, unknown>,
+  options: { currentLabel?: string; baselineLabel?: string; maxRows?: number } = {},
+): Record<string, unknown> {
+  const currentDurationMs = microProfilerDurationMs(current);
+  const baselineDurationMs = microProfilerDurationMs(baseline);
+  const maxRows = Math.max(1, Math.min(100, Math.trunc(options.maxRows ?? 20)));
+
+  const groupDeltas = compareMicroProfilerRows(
+    rowSet(current, 'groups', 'top_groups'),
+    rowSet(baseline, 'groups', 'top_groups'),
+    currentDurationMs,
+    baselineDurationMs,
+    (row) => stringField(row, 'group'),
+    (row, key) => ({ group: stringField(row, 'group') || key }),
+    maxRows,
+  );
+
+  const timerDeltas = compareMicroProfilerRows(
+    rowSet(current, 'timers', 'top_timers'),
+    rowSet(baseline, 'timers', 'top_timers'),
+    currentDurationMs,
+    baselineDurationMs,
+    (row) => `${stringField(row, 'group')}::${stringField(row, 'name') || stringField(row, 'timer_id')}`,
+    (row, key) => ({
+      group: stringField(row, 'group') || key.split('::')[0],
+      name: stringField(row, 'name') || key.split('::')[1],
+      timer_id: row.timer_id,
+    }),
+    maxRows,
+  );
+
+  const threadDeltas = compareMicroProfilerRows(
+    rowSet(current, 'threads', 'top_threads'),
+    rowSet(baseline, 'threads', 'top_threads'),
+    currentDurationMs,
+    baselineDurationMs,
+    (row) => stringField(row, 'thread_name') || String(numberField(row, 'thread_id')),
+    (row, key) => ({
+      thread_id: row.thread_id,
+      thread_name: stringField(row, 'thread_name') || key,
+      is_gpu: row.is_gpu,
+    }),
+    maxRows,
+  );
+
+  const edgeDeltas = compareMicroProfilerRows(
+    rowSet(current, 'call_edges', 'top_call_edges'),
+    rowSet(baseline, 'call_edges', 'top_call_edges'),
+    currentDurationMs,
+    baselineDurationMs,
+    (row) => {
+      const parent = nestedRecord(row, 'parent');
+      const child = nestedRecord(row, 'child');
+      return [
+        stringField(parent, 'group'),
+        stringField(parent, 'name') || stringField(parent, 'timer_id'),
+        '>',
+        stringField(child, 'group'),
+        stringField(child, 'name') || stringField(child, 'timer_id'),
+      ].join('::');
+    },
+    (row, key) => ({
+      parent: nestedRecord(row, 'parent') ?? { label: key },
+      child: nestedRecord(row, 'child') ?? { label: key },
+    }),
+    maxRows,
+  );
+
+  const currentHasIndex = asRecord(current.comparison_index) !== undefined;
+  const baselineHasIndex = asRecord(baseline.comparison_index) !== undefined;
+  return {
+    baseline_label: options.baselineLabel ?? 'baseline',
+    current_label: options.currentLabel ?? 'current',
+    basis: 'inclusive_us_per_second normalized by each capture analysis duration; deltas use current minus baseline.',
+    coverage: {
+      current: currentHasIndex ? 'comparison_index' : 'returned_rows',
+      baseline: baselineHasIndex ? 'comparison_index' : 'returned_rows',
+    },
+    duration_ms: {
+      baseline: baselineDurationMs,
+      current: currentDurationMs,
+    },
+    groups: groupDeltas,
+    timers: timerDeltas,
+    threads: threadDeltas,
+    call_edges: edgeDeltas,
+  };
 }
 
 const NETWORK_PROFILE_KEYS = [
@@ -545,6 +791,7 @@ export class RobloxStudioTools {
     data: any,
     target: string | undefined,
     instance_id: string | undefined,
+    timeoutMs?: number,
   ): Promise<any> {
     // Pass target through as-is so resolveTarget can tell "caller didn't
     // specify" (target=undefined → multiple_instances_connected) apart
@@ -563,7 +810,7 @@ export class RobloxStudioTools {
         },
       });
     }
-    return this.client.request(endpoint, data, r.targetInstanceId, r.targetRole);
+    return this.client.request(endpoint, data, r.targetInstanceId, r.targetRole, timeoutMs);
   }
 
   // Resolves which connected place a tool should target and whether a playtest
@@ -2278,6 +2525,102 @@ export class RobloxStudioTools {
     return { content: [{ type: 'text', text: JSON.stringify(body) }] };
   }
 
+  async captureMicroProfiler(target?: string, request: Record<string, unknown> = {}, instance_id?: string) {
+    const targetRole = target ?? 'server';
+    const data: Record<string, unknown> = { ...request };
+    const outputPath = data.output_path;
+    const summaryOutputPath = data.summary_output_path;
+    const baselinePath = data.baseline_path;
+    const baseline = data.baseline;
+    const baselineLabel = typeof data.baseline_label === 'string' ? data.baseline_label : undefined;
+    const currentLabel = typeof data.current_label === 'string' ? data.current_label : undefined;
+    const maxComparisonRows = typeof data.max_comparison_rows === 'number' ? data.max_comparison_rows : undefined;
+    const includeComparisonIndex = data.include_comparison_index === true;
+    delete data.output_path;
+    delete data.summary_output_path;
+    delete data.baseline_path;
+    delete data.baseline;
+    delete data.baseline_label;
+    delete data.current_label;
+    delete data.max_comparison_rows;
+    delete data.include_comparison_index;
+
+    if (outputPath !== undefined && typeof outputPath !== 'string') {
+      throw new Error('output_path must be a string when provided');
+    }
+    if (summaryOutputPath !== undefined && typeof summaryOutputPath !== 'string') {
+      throw new Error('summary_output_path must be a string when provided');
+    }
+    if (outputPath) {
+      data.__mcp_include_raw_buffer = true;
+    }
+    if (summaryOutputPath || baselinePath || baseline || includeComparisonIndex) {
+      data.__mcp_include_comparison_index = true;
+    }
+
+    const resolved = this.bridge.resolveTarget({ instance_id, target: targetRole });
+    if (!resolved.ok) throw new RoutingFailure(resolved.error);
+    if (resolved.mode !== 'single') {
+      throw new RoutingFailure({
+        code: 'target_role_not_present_on_instance',
+        message: 'capture_micro_profiler profiles one runtime peer at a time. Pick target="server" or a specific "client-N".',
+        data: {
+          instances: this.bridge.getPublicInstances(),
+          count: this.bridge.getInstances().length,
+        },
+      });
+    }
+
+    data.__mcp_instance_id = resolved.targetInstanceId;
+    data.__mcp_target_role = resolved.targetRole;
+    const response = await this.client.request(
+      '/api/capture-micro-profiler',
+      data,
+      resolved.targetInstanceId,
+      resolved.targetRole,
+    );
+
+    const body: unknown = response !== null && typeof response === 'object' && !Array.isArray(response)
+      ? { ...response, target: resolved.targetRole }
+      : response;
+
+    if (body !== null && typeof body === 'object' && !Array.isArray(body)) {
+      const mutable = body as Record<string, unknown>;
+      const rawSnapshotBase64 = mutable.raw_snapshot_base64;
+      if (typeof rawSnapshotBase64 === 'string') {
+        if (typeof outputPath === 'string' && outputPath !== '') {
+          const resolvedOutputPath = path.resolve(outputPath);
+          fs.mkdirSync(path.dirname(resolvedOutputPath), { recursive: true });
+          fs.writeFileSync(resolvedOutputPath, Buffer.from(rawSnapshotBase64, 'base64'));
+          mutable.output_path = resolvedOutputPath;
+        }
+        delete mutable.raw_snapshot_base64;
+      }
+
+      const baselineCapture = loadMicroProfilerBaseline(baseline, baselinePath);
+      if (baselineCapture) {
+        mutable.baseline_comparison = compareMicroProfilerCaptures(mutable, baselineCapture, {
+          baselineLabel,
+          currentLabel,
+          maxRows: maxComparisonRows,
+        });
+      }
+
+      if (typeof summaryOutputPath === 'string' && summaryOutputPath !== '') {
+        const resolvedSummaryPath = path.resolve(summaryOutputPath);
+        fs.mkdirSync(path.dirname(resolvedSummaryPath), { recursive: true });
+        fs.writeFileSync(resolvedSummaryPath, JSON.stringify(mutable, null, 2), 'utf8');
+        mutable.summary_output_path = resolvedSummaryPath;
+      }
+
+      if (!includeComparisonIndex) {
+        delete mutable.comparison_index;
+      }
+    }
+
+    return { content: [{ type: 'text', text: JSON.stringify(body) }] };
+  }
+
   async breakpoints(action: string, request: Record<string, unknown> = {}, target?: string, instance_id?: string) {
     if (!action || typeof action !== 'string') {
       throw new Error('breakpoints requires action=set|remove|clear|list');
@@ -2334,6 +2677,17 @@ export class RobloxStudioTools {
     );
   }
 
+  private _matchesManagedLaunch(record: ManagedStudioInstance, instance: PublicPluginInstance): boolean {
+    if (record.source === 'published_place') {
+      return record.placeId !== undefined && instance.placeId === record.placeId;
+    }
+    if ((record.source === 'baseplate' || record.source === 'local_file') && record.localPlaceFile) {
+      const expectedName = path.basename(record.localPlaceFile);
+      return instance.placeName === expectedName || instance.dataModelName === expectedName;
+    }
+    return true;
+  }
+
   private async _deriveUniverseId(placeId: number): Promise<number> {
     const response = await fetch(`https://apis.roblox.com/universes/v1/places/${placeId}/universe`);
     if (!response.ok) {
@@ -2358,12 +2712,7 @@ export class RobloxStudioTools {
         .filter((instance) => instance.role === 'edit')
         .filter((instance) => !beforeKeys.has(this._publicInstanceKey(instance)))
         .filter((instance) => instance.connectedAt >= record.launchedAt - 1000)
-        .filter((instance) => {
-          if (record.source === 'published_place') {
-            return record.placeId !== undefined && instance.placeId === record.placeId;
-          }
-          return true;
-        })
+        .filter((instance) => this._matchesManagedLaunch(record, instance))
         .sort((a, b) => b.connectedAt - a.connectedAt);
 
       if (candidates[0]) return candidates[0];
@@ -2471,6 +2820,7 @@ export class RobloxStudioTools {
           }
           try {
             this.instanceManager.closeConnectedInstance(edit);
+            await sleep(500);
           } catch (error) {
             return this._textResult({
               error: error instanceof Error ? error.message : String(error),
@@ -2497,8 +2847,12 @@ export class RobloxStudioTools {
         record = active[0];
       }
 
-      this.instanceManager.close(record);
       if (record.instanceId) this.bridge.unregisterInstanceId(record.instanceId);
+      this.instanceManager.close(record);
+      if (record.instanceId) {
+        await sleep(500);
+        this.bridge.unregisterInstanceId(record.instanceId);
+      }
       return this._textResult({
         instance_id: record.instanceId,
         message: 'Studio instance closed.',
@@ -3856,6 +4210,139 @@ export class RobloxStudioTools {
     };
   }
 
+  async generateModel(request: Record<string, unknown> = {}, instance_id?: string) {
+    try {
+      return await this._generateModel(request, instance_id);
+    } catch (error) {
+      if (error instanceof RoutingFailure) throw error;
+      const message = error instanceof Error ? error.message : String(error);
+      return {
+        content: [{
+          type: 'text',
+          text: JSON.stringify({ success: false, error: message }),
+        }],
+      };
+    }
+  }
+
+  private async _generateModel(request: Record<string, unknown> = {}, instance_id?: string) {
+    const prompt = typeof request.prompt === 'string' && request.prompt.trim() !== ''
+      ? request.prompt
+      : undefined;
+    const imagePath = typeof request.image_path === 'string' && request.image_path !== ''
+      ? request.image_path
+      : undefined;
+    const imageBase64 = typeof request.image_base64 === 'string' && request.image_base64 !== ''
+      ? request.image_base64
+      : undefined;
+    const imageAssetId = typeof request.image_asset_id === 'number' && Number.isFinite(request.image_asset_id)
+      ? Math.trunc(request.image_asset_id)
+      : undefined;
+
+    const imageSourceCount = [imagePath, imageBase64, imageAssetId].filter((value) => value !== undefined).length;
+    if (!prompt && imageSourceCount === 0) {
+      throw new Error('generate_model requires prompt, image_path, image_base64, or image_asset_id.');
+    }
+    if (imageSourceCount > 1) {
+      throw new Error('generate_model accepts only one image source: image_path, image_base64, or image_asset_id.');
+    }
+
+    const schema = typeof request.schema === 'string' && request.schema !== ''
+      ? request.schema
+      : undefined;
+    const schemaGroups = Array.isArray(request.schema_groups) ? request.schema_groups : undefined;
+    if (schema && schemaGroups) {
+      throw new Error('schema and schema_groups are mutually exclusive.');
+    }
+    if (schema && schema !== 'Body1' && schema !== 'Car5') {
+      throw new Error('schema must be Body1 or Car5.');
+    }
+    if (schemaGroups) {
+      if (schemaGroups.length === 0 || !schemaGroups.every((entry) => typeof entry === 'string' && entry.trim() !== '')) {
+        throw new Error('schema_groups must be a non-empty array of strings.');
+      }
+    }
+
+    const size = request.size;
+    let modelSize: { x: number; y: number; z: number } | undefined;
+    if (size !== undefined) {
+      if (!size || typeof size !== 'object' || Array.isArray(size)) {
+        throw new Error('size must be an object with positive x, y, and z numbers.');
+      }
+      const rawSize = size as Record<string, unknown>;
+      const x = rawSize.x;
+      const y = rawSize.y;
+      const z = rawSize.z;
+      if (typeof x !== 'number' || typeof y !== 'number' || typeof z !== 'number' || x <= 0 || y <= 0 || z <= 0) {
+        throw new Error('size must be an object with positive x, y, and z numbers.');
+      }
+      modelSize = { x, y, z };
+    }
+
+    let image: GenerateModelImage | undefined;
+    if (imagePath) {
+      const decoded = decodeImagePathToRgba(imagePath);
+      const png = rgbaToPng(decoded.rgba, decoded.width, decoded.height);
+      const imageAssetId = await this.uploadGenerateModelReferenceImage(
+        png,
+        instance_id,
+      );
+      image = {
+        kind: 'asset',
+        asset_id: imageAssetId,
+      };
+    } else if (imageBase64) {
+      const imageMimeType = request.image_mime_type;
+      if (imageMimeType !== 'image/png') {
+        throw new Error('image_mime_type must be "image/png" when image_base64 is provided.');
+      }
+      const decoded = decodePngToRgba(Buffer.from(imageBase64, 'base64'));
+      const png = rgbaToPng(decoded.rgba, decoded.width, decoded.height);
+      const imageAssetId = await this.uploadGenerateModelReferenceImage(
+        png,
+        instance_id,
+      );
+      image = {
+        kind: 'asset',
+        asset_id: imageAssetId,
+      };
+    } else if (imageAssetId !== undefined) {
+      if (imageAssetId <= 0) throw new Error('image_asset_id must be a positive number.');
+      image = { kind: 'asset', asset_id: imageAssetId };
+    }
+
+    const maxTriangles = request.max_triangles !== undefined
+      ? this._optionalPositiveInteger(request.max_triangles, 'max_triangles')
+      : undefined;
+    const timeoutMs = request.timeout_ms !== undefined
+      ? this._optionalPositiveInteger(request.timeout_ms, 'timeout_ms')
+      : 120000;
+    if (timeoutMs !== undefined && timeoutMs > 300000) {
+      throw new Error('timeout_ms must be 300000 or less.');
+    }
+
+    const payload: Record<string, unknown> = {
+      prompt,
+      image,
+      schema_groups: schemaGroups,
+      name: typeof request.name === 'string' && request.name !== '' ? request.name : undefined,
+      size: modelSize,
+      max_triangles: maxTriangles,
+      generate_textures: typeof request.generate_textures === 'boolean' ? request.generate_textures : undefined,
+    };
+    if (!schemaGroups) {
+      payload.schema = schema ?? 'Body1';
+    }
+
+    const response = await this._callSingle('/api/generate-model', payload, 'edit', instance_id, timeoutMs);
+    return {
+      content: [{
+        type: 'text',
+        text: JSON.stringify(response),
+      }],
+    };
+  }
+
   async previewAsset(assetId: number, includeProperties?: boolean, maxDepth?: number, instance_id?: string) {
     if (!assetId) {
       throw new Error('Asset ID is required for preview_asset');
@@ -3876,7 +4363,7 @@ export class RobloxStudioTools {
   // Decal asset IDs are the wrapper asset; ImageLabel.Image needs the underlying image
   // content ID. The only reliable cross-auth way to resolve this is InsertService:LoadAsset
   // via the connected Studio plugin - the unauthenticated economy endpoint returns 401.
-  private async resolveImageId(decalAssetId: string): Promise<string | null> {
+  private async resolveImageId(decalAssetId: string, instance_id?: string): Promise<string | null> {
     const code = `
       local InsertService = game:GetService("InsertService")
       local ok, result = pcall(function() return InsertService:LoadAsset(${decalAssetId}) end)
@@ -3887,7 +4374,7 @@ export class RobloxStudioTools {
       return id
     `;
     try {
-      const response = await this._callSingle('/api/execute-luau', { code }, 'edit', undefined) as { returnValue?: unknown };
+      const response = await this._callSingle('/api/execute-luau', { code }, 'edit', instance_id) as { returnValue?: unknown };
       const returnValue = response?.returnValue;
       if (returnValue !== undefined && returnValue !== null && /^\d+$/.test(String(returnValue))) {
         return String(returnValue);
@@ -3896,6 +4383,90 @@ export class RobloxStudioTools {
       // plugin not connected or luau execution failed
     }
     return null;
+  }
+
+  private async resolveUploadedReferenceImageId(decalAssetId: string, instance_id?: string): Promise<number> {
+    let lastError = '';
+    for (let attempt = 0; attempt < 10; attempt++) {
+      if (this.openCloudClient.hasApiKey()) {
+        try {
+          const details = await this.openCloudClient.getAssetDetails(Number(decalAssetId));
+          const textureId = details.asset?.textureId;
+          if (typeof textureId === 'number' && Number.isFinite(textureId) && textureId > 0) {
+            return Math.trunc(textureId);
+          }
+        } catch (error) {
+          lastError = errorMessage(error);
+        }
+      }
+
+      const studioImageId = await this.resolveImageId(decalAssetId, instance_id);
+      if (studioImageId !== null) {
+        return Number(studioImageId);
+      }
+
+      if (attempt < 9) {
+        await sleep(1000);
+      }
+    }
+
+    const suffix = lastError ? ` Last resolver error: ${lastError}` : '';
+    throw new Error(`Reference image upload succeeded, but the backing image asset ID could not be resolved for Decal ${decalAssetId}.${suffix}`);
+  }
+
+  private async uploadGenerateModelReferenceImage(
+    imageContent: Buffer,
+    instance_id?: string,
+  ): Promise<number> {
+    if (this.cookieClient.hasCookie()) {
+      const result = await this.cookieClient.uploadDecal(
+        imageContent,
+        STUDIO_ASSISTANT_SOURCE_IMAGE_LABEL,
+        STUDIO_ASSISTANT_SOURCE_IMAGE_LABEL,
+      );
+      if (result.backingAssetId && result.backingAssetId > 0) {
+        return result.backingAssetId;
+      }
+      return this.resolveUploadedReferenceImageId(String(result.assetId), instance_id);
+    }
+
+    if (!this.openCloudClient.hasApiKey()) {
+      throw new Error(
+        'image_path and image_base64 require Roblox asset upload credentials because GenerateModelAsync only accepts rbxassetid:// or rbxasset:// image inputs. Set ROBLOX_OPEN_CLOUD_API_KEY plus ROBLOX_CREATOR_USER_ID or ROBLOX_CREATOR_GROUP_ID, or pass image_asset_id.'
+      );
+    }
+
+    const resolvedGroupId = process.env.ROBLOX_CREATOR_GROUP_ID;
+    const resolvedUserId = process.env.ROBLOX_CREATOR_USER_ID;
+    if (!resolvedUserId && !resolvedGroupId) {
+      throw new Error(
+        'Creator identity required for image upload. Set ROBLOX_CREATOR_USER_ID or ROBLOX_CREATOR_GROUP_ID, or pass image_asset_id.'
+      );
+    }
+
+    const creator: { userId?: string; groupId?: string } = {};
+    if (resolvedGroupId) {
+      creator.groupId = resolvedGroupId;
+    } else {
+      creator.userId = resolvedUserId;
+    }
+
+    const result = await this.openCloudClient.createAsset(
+      {
+        assetType: 'Decal',
+        displayName: STUDIO_ASSISTANT_SOURCE_IMAGE_LABEL,
+        description: STUDIO_ASSISTANT_SOURCE_IMAGE_LABEL,
+        creationContext: { creator },
+      },
+      imageContent,
+      'generate-model-reference.png',
+    );
+
+    const decalId = result.response?.assetId;
+    if (!decalId || !/^\d+$/.test(decalId)) {
+      throw new Error('Reference image upload did not return an asset ID.');
+    }
+    return this.resolveUploadedReferenceImageId(decalId, instance_id);
   }
 
   async uploadAsset(

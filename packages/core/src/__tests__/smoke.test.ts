@@ -1,7 +1,7 @@
 import { BridgeService } from '../bridge-service.js';
 import { createHttpServer } from '../http-server.js';
 import { RobloxStudioTools } from '../tools/index.js';
-import { buildStudioLaunchArgs } from '../studio-instance-manager.js';
+import { buildStudioLaunchArgs, cleanupManagedBaseplateFiles } from '../studio-instance-manager.js';
 import request from 'supertest';
 import * as fs from 'fs';
 import * as os from 'os';
@@ -306,12 +306,81 @@ describe('Smoke', () => {
     ]);
   });
 
+  test('baseplate launch args open a managed copy of the bundled baseplate', () => {
+    const args = buildStudioLaunchArgs({ source: 'baseplate' });
+    const placeFile = args[3];
+    const templateFile = path.join(process.cwd(), 'assets', 'Baseplate.rbxl');
+
+    expect(args.slice(0, 3)).toEqual(['--task', 'EditFile', '--localPlaceFile']);
+    expect(placeFile).toMatch(/Baseplate-\d+-\d+\.rbxl$/);
+    expect(fs.existsSync(placeFile)).toBe(true);
+    expect(fs.readFileSync(placeFile)).toEqual(fs.readFileSync(templateFile));
+
+    fs.rmSync(placeFile, { force: true });
+  });
+
+  test('baseplate cleanup removes generated temp files and Studio lock sidecars', () => {
+    const dir = path.join(os.tmpdir(), 'robloxstudio-mcp-baseplates');
+    fs.mkdirSync(dir, { recursive: true });
+    const placeFile = path.join(dir, 'Baseplate-123-456.rbxl');
+    const lockFile = `${placeFile}.lock`;
+    fs.writeFileSync(placeFile, '<roblox />', 'utf8');
+    fs.writeFileSync(lockFile, '', 'utf8');
+
+    cleanupManagedBaseplateFiles({ source: 'baseplate', localPlaceFile: placeFile });
+
+    expect(fs.existsSync(placeFile)).toBe(false);
+    expect(fs.existsSync(lockFile)).toBe(false);
+  });
+
+  test('baseplate cleanup does not remove caller-owned local place files', () => {
+    const placeFile = path.join(os.tmpdir(), 'Baseplate-user-owned.rbxlx');
+    fs.writeFileSync(placeFile, '<roblox />', 'utf8');
+
+    cleanupManagedBaseplateFiles({ source: 'local_file', localPlaceFile: placeFile });
+    cleanupManagedBaseplateFiles({ source: 'baseplate', localPlaceFile: placeFile });
+
+    expect(fs.existsSync(placeFile)).toBe(true);
+    fs.rmSync(placeFile, { force: true });
+  });
+
+  test('managed baseplate launch matching ignores unrelated existing Studio connections', () => {
+    const bridge = new BridgeService();
+    const tools = new RobloxStudioTools(bridge);
+    const matches = (tools as unknown as {
+      _matchesManagedLaunch(record: Record<string, unknown>, instance: typeof READY): boolean;
+    })._matchesManagedLaunch.bind(tools);
+    const localPlaceFile = path.join(os.tmpdir(), 'Baseplate-race-test.rbxl');
+    const record = {
+      source: 'baseplate',
+      localPlaceFile,
+      launchedAt: Date.now(),
+    };
+
+    expect(matches(record, {
+      ...READY,
+      instanceId: 'place:90999018355158',
+      placeId: 90999018355158,
+      placeName: 'STRAIN',
+      dataModelName: 'STRAIN',
+    })).toBe(false);
+    expect(matches(record, {
+      ...READY,
+      instanceId: 'anon:test',
+      placeId: 0,
+      placeName: 'Baseplate-race-test.rbxl',
+      dataModelName: 'Baseplate-race-test.rbxl',
+    })).toBe(true);
+  });
+
   test('client broker forwards script profiler captures to client peers', () => {
     const cwd = process.cwd();
     const repoRoot = fs.existsSync(path.join(cwd, 'studio-plugin')) ? cwd : path.resolve(cwd, '../..');
     const source = fs.readFileSync(path.join(repoRoot, 'studio-plugin/src/modules/ClientBroker.ts'), 'utf8');
     expect(source).toContain('"/api/capture-script-profiler"');
     expect(source).toContain('payload.endpoint === "/api/capture-script-profiler"');
+    expect(source).toContain('"/api/capture-micro-profiler"');
+    expect(source).toContain('payload.endpoint === "/api/capture-micro-profiler"');
   });
 
   test('breakpoints decorates response with resolved target role', async () => {
@@ -401,6 +470,235 @@ describe('Smoke', () => {
     });
     expect(fs.readFileSync(outputPath, 'utf8')).toBe('{"Version":2}');
     fs.rmSync(outputPath, { force: true });
+  });
+
+  test('capture_micro_profiler routes to one runtime peer and writes raw snapshot to output_path', async () => {
+    const bridge = new BridgeService();
+    const tools = new RobloxStudioTools(bridge);
+    bridge.registerInstance(READY);
+    bridge.registerInstance({
+      pluginSessionId: 'server-1',
+      instanceId: 'place:test',
+      role: 'server',
+      placeId: 0,
+      placeName: 'TestPlace',
+      dataModelName: 'Game',
+      isRunning: true,
+    });
+    const outputPath = path.join(os.tmpdir(), `rsmcp-micro-profiler-${Date.now()}.mp`);
+    const summaryOutputPath = path.join(os.tmpdir(), `rsmcp-micro-profiler-${Date.now()}.json`);
+
+    const resultPromise = tools.captureMicroProfiler('server', {
+      duration_ms: 250,
+      focus: 'script',
+      max_events: 10000,
+      max_groups: 10,
+      max_timers_per_group: 3,
+      summary_output_path: summaryOutputPath,
+      output_path: outputPath,
+      baseline_label: 'empty_baseplate',
+      current_label: 'game',
+      max_comparison_rows: 5,
+      baseline: {
+        duration_ms: 250,
+        top_groups: [{ group: 'Script', total_us: 100, exclusive_us: 40, count: 2 }],
+        top_timers: [{ group: 'Script', name: '$Script', total_us: 80, exclusive_us: 30, count: 2 }],
+      },
+    }, 'place:test');
+
+    const pending = bridge.getPendingRequest('place:test', 'server');
+    expect(pending?.request).toMatchObject({
+      endpoint: '/api/capture-micro-profiler',
+      data: {
+        duration_ms: 250,
+        focus: 'script',
+        max_events: 10000,
+	        max_groups: 10,
+	        max_timers_per_group: 3,
+	        __mcp_include_raw_buffer: true,
+	        __mcp_include_comparison_index: true,
+	        __mcp_instance_id: 'place:test',
+	        __mcp_target_role: 'server',
+	      },
+    });
+    bridge.resolveRequest(pending!.requestId, {
+      ok: true,
+      raw_snapshot_base64: Buffer.from('micro').toString('base64'),
+      duration_ms: 250,
+      top_timers: [{ group: 'Script', name: '$Script', total_us: 280, exclusive_us: 90, count: 3 }],
+      top_groups: [{ group: 'Script', total_us: 300, exclusive_us: 100, count: 3 }],
+      counts: { events_sampled: 0 },
+    });
+
+    const result = await resultPromise;
+    const body = JSON.parse(result.content[0].text);
+    expect(body).toEqual({
+      target: 'server',
+      ok: true,
+      output_path: path.resolve(outputPath),
+      summary_output_path: path.resolve(summaryOutputPath),
+      duration_ms: 250,
+      top_timers: [{ group: 'Script', name: '$Script', total_us: 280, exclusive_us: 90, count: 3 }],
+      top_groups: [{ group: 'Script', total_us: 300, exclusive_us: 100, count: 3 }],
+      counts: { events_sampled: 0 },
+      baseline_comparison: {
+	        baseline_label: 'empty_baseplate',
+	        current_label: 'game',
+	        basis: 'inclusive_us_per_second normalized by each capture analysis duration; deltas use current minus baseline.',
+	        coverage: { current: 'returned_rows', baseline: 'returned_rows' },
+	        duration_ms: { baseline: 250, current: 250 },
+	        groups: [{
+	          group: 'Script',
+	          matched_by: 'stable_label',
+	          match_confidence: 'medium',
+	          current_inclusive_us: 300,
+	          baseline_inclusive_us: 100,
+	          delta_inclusive_us: 200,
+	          current_inclusive_us_per_s: 1200,
+	          baseline_inclusive_us_per_s: 400,
+	          delta_inclusive_us_per_s: 800,
+	          current_exclusive_us: 100,
+	          baseline_exclusive_us: 40,
+	          delta_exclusive_us: 60,
+	          current_exclusive_us_per_s: 400,
+	          baseline_exclusive_us_per_s: 160,
+	          delta_exclusive_us_per_s: 240,
+	          current_count: 3,
+	          baseline_count: 2,
+	          delta_count: 1,
+	          current_count_per_s: 12,
+	          baseline_count_per_s: 8,
+	          delta_count_per_s: 4,
+	          delta_pct: 200,
+	        }],
+	        timers: [{
+	          group: 'Script',
+	          name: '$Script',
+	          matched_by: 'stable_label',
+	          match_confidence: 'medium',
+	          current_inclusive_us: 280,
+	          baseline_inclusive_us: 80,
+	          delta_inclusive_us: 200,
+	          current_inclusive_us_per_s: 1120,
+	          baseline_inclusive_us_per_s: 320,
+	          delta_inclusive_us_per_s: 800,
+	          current_exclusive_us: 90,
+	          baseline_exclusive_us: 30,
+	          delta_exclusive_us: 60,
+	          current_exclusive_us_per_s: 360,
+	          baseline_exclusive_us_per_s: 120,
+	          delta_exclusive_us_per_s: 240,
+	          current_count: 3,
+	          baseline_count: 2,
+	          delta_count: 1,
+	          current_count_per_s: 12,
+	          baseline_count_per_s: 8,
+	          delta_count_per_s: 4,
+	          delta_pct: 250,
+	        }],
+	        threads: [],
+	        call_edges: [],
+	      },
+	    });
+    expect(fs.readFileSync(outputPath, 'utf8')).toBe('micro');
+	    const summary = JSON.parse(fs.readFileSync(summaryOutputPath, 'utf8'));
+	    expect(summary.baseline_comparison.groups[0].delta_inclusive_us_per_s).toBe(800);
+    fs.rmSync(outputPath, { force: true });
+    fs.rmSync(summaryOutputPath, { force: true });
+  });
+
+  test('generate_model routes to edit context and returns brief model path response', async () => {
+    const bridge = new BridgeService();
+    const tools = new RobloxStudioTools(bridge);
+    bridge.registerInstance(READY);
+
+    const resultPromise = tools.generateModel({
+      prompt: 'low-poly sci-fi crate',
+      name: 'GeneratedCrate',
+      schema: 'Body1',
+      timeout_ms: 60000,
+    }, 'place:test');
+
+    const pending = bridge.getPendingRequest('place:test', 'edit');
+    expect(pending?.request).toMatchObject({
+      endpoint: '/api/generate-model',
+      data: {
+        prompt: 'low-poly sci-fi crate',
+        name: 'GeneratedCrate',
+        schema: 'Body1',
+      },
+    });
+    bridge.resolveRequest(pending!.requestId, {
+      success: true,
+      modelPath: 'game.ServerStorage.__MCPGeneratedModels.GeneratedCrate',
+    });
+
+    const result = await resultPromise;
+    expect(JSON.parse(result.content[0].text)).toEqual({
+      success: true,
+      modelPath: 'game.ServerStorage.__MCPGeneratedModels.GeneratedCrate',
+    });
+  });
+
+  test('generate_model sends schema_groups without a conflicting default schema', async () => {
+    const bridge = new BridgeService();
+    const tools = new RobloxStudioTools(bridge);
+    bridge.registerInstance(READY);
+
+    const resultPromise = tools.generateModel({
+      prompt: 'low-poly vehicle',
+      name: 'SegmentedVehicle',
+      schema_groups: ['Body', 'Front Left Wheel', 'Front Right Wheel', 'Rear Left Wheel', 'Rear Right Wheel'],
+    }, 'place:test');
+
+    const pending = bridge.getPendingRequest('place:test', 'edit');
+    expect(pending?.request.endpoint).toBe('/api/generate-model');
+    expect(pending?.request.data.schema_groups).toEqual([
+      'Body',
+      'Front Left Wheel',
+      'Front Right Wheel',
+      'Rear Left Wheel',
+      'Rear Right Wheel',
+    ]);
+    expect(pending?.request.data).not.toHaveProperty('schema');
+    bridge.resolveRequest(pending!.requestId, {
+      success: true,
+      modelPath: 'game.ServerStorage.__MCPGeneratedModels.SegmentedVehicle',
+    });
+
+    await resultPromise;
+  });
+
+  test('generate_model source image upload uses backing textureId instead of Decal wrapper id', async () => {
+    const bridge = new BridgeService();
+    const tools = new RobloxStudioTools(bridge) as any;
+    tools.cookieClient = { hasCookie: () => false };
+    tools.openCloudClient = {
+      hasApiKey: () => true,
+      createAsset: jest.fn(async () => ({
+        response: { assetId: '555', displayName: 'Studio Assistant Source Image', assetType: 'Decal' },
+      })),
+      getAssetDetails: jest.fn(async () => ({
+        asset: { id: 555, textureId: 777, name: 'Studio Assistant Source Image' },
+      })),
+    };
+    tools.resolveImageId = jest.fn(async () => {
+      throw new Error('Studio resolver should not be needed when textureId is available');
+    });
+
+    const imageId = await tools.uploadGenerateModelReferenceImage(Buffer.from('not actually png'), 'place:test');
+
+    expect(imageId).toBe(777);
+    expect(tools.openCloudClient.createAsset).toHaveBeenCalledWith(
+      expect.objectContaining({
+        assetType: 'Decal',
+        displayName: 'Studio Assistant Source Image',
+        description: 'Studio Assistant Source Image',
+      }),
+      expect.any(Buffer),
+      'generate-model-reference.png',
+    );
+    expect(tools.resolveImageId).not.toHaveBeenCalled();
   });
 
   test('start_playtest reports already running when runtime peers are connected', async () => {

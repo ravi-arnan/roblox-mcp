@@ -12,9 +12,10 @@ export class StudioHttpClient {
     data: any,
     targetInstanceId: string,
     targetRole: string,
+    timeoutMs?: number,
   ): Promise<any> {
     try {
-      const response = await this.bridge.sendRequest(endpoint, data, targetInstanceId, targetRole);
+      const response = await this.bridge.sendRequest(endpoint, data, targetInstanceId, targetRole, timeoutMs);
       return response;
     } catch (error) {
       if (error instanceof Error && error.message === 'Request timeout') {

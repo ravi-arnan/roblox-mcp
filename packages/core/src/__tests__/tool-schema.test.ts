@@ -183,6 +183,7 @@ describe('Tool schema compatibility', () => {
       multiplayer_test_end: 'multiplayerTestEnd',
       get_runtime_logs: 'getRuntimeLogs',
       capture_script_profiler: 'captureScriptProfiler',
+      capture_micro_profiler: 'captureMicroProfiler',
       breakpoints: 'breakpoints',
       export_build: 'exportBuild',
       import_build: 'importBuild',
@@ -191,6 +192,7 @@ describe('Tool schema compatibility', () => {
       undo: 'undo',
       redo: 'redo',
       insert_asset: 'insertAsset',
+      generate_model: 'generateModel',
       preview_asset: 'previewAsset',
       clone_object: 'cloneObject',
       get_descendants: 'getDescendants',
@@ -352,6 +354,110 @@ describe('Tool schema compatibility', () => {
     expect((props.min_total_us as { default?: number; minimum?: number }).minimum).toBe(0);
     expect((props.min_total_us as { description?: string }).description).toContain('microseconds');
     expect((props.output_path as { description?: string }).description).toContain('raw Script Profiler JSON');
+  });
+
+  test('capture_micro_profiler schema exposes focused engine profiler primitive', () => {
+    const tool = TOOL_DEFINITIONS.find((t) => t.name === 'capture_micro_profiler');
+    expect(tool).toBeTruthy();
+    const schema = tool!.inputSchema as { properties?: Record<string, unknown> };
+    const props = schema.properties ?? {};
+    expect(Object.keys(props).sort()).toEqual([
+      'baseline',
+      'baseline_label',
+      'baseline_path',
+      'current_label',
+      'duration_ms',
+      'filter',
+      'focus',
+	      'frame_window',
+	      'include_comparison_index',
+	      'include_gpu',
+	      'include_idle',
+	      'instance_id',
+	      'max_comparison_rows',
+	      'max_events',
+	      'max_groups',
+	      'max_related_timers',
+	      'max_timers',
+	      'max_timers_per_group',
+      'min_total_us',
+      'output_path',
+      'summary_output_path',
+      'target',
+    ].sort());
+    expect(tool!.category).toBe('read');
+    expect(tool!.description).toContain('MicroProfiler');
+    expect(tool!.description).toContain('LibMP');
+    expect(tool!.description).toContain('baseline_comparison');
+    expect(tool!.description).toContain('summary_output_path');
+	    expect(tool!.description).toContain('inclusive_us');
+	    expect(tool!.description).toContain('top_threads');
+	    expect(tool!.description).toContain('top_call_edges');
+	    expect(tool!.description).toContain('comparison_index');
+    expect(tool!.description).toContain('top_groups');
+    expect(tool!.description).toContain('microseconds');
+    expect(tool!.description).toContain('do not sum rows');
+    expect(tool!.description).toContain('event_limit_hit');
+    expect(tool!.description).toContain('recommended_tools is intentionally brief');
+    expect((props.target as { pattern?: string }).pattern).toBe('^(server|client-[0-9]+)$');
+    expect((props.duration_ms as { default?: number; minimum?: number; maximum?: number }).default).toBe(1000);
+    expect((props.duration_ms as { default?: number; minimum?: number; maximum?: number }).minimum).toBe(100);
+    expect((props.duration_ms as { default?: number; minimum?: number; maximum?: number }).maximum).toBe(5000);
+    expect((props.focus as { enum?: string[]; default?: string }).enum).toEqual(['all', 'script', 'physics', 'render', 'network', 'jobs']);
+    expect((props.focus as { enum?: string[]; default?: string }).default).toBe('all');
+    expect((props.max_timers as { default?: number; minimum?: number; maximum?: number }).default).toBe(20);
+    expect((props.max_timers as { default?: number; minimum?: number; maximum?: number }).minimum).toBe(1);
+    expect((props.max_timers as { default?: number; minimum?: number; maximum?: number }).maximum).toBe(100);
+    expect((props.max_groups as { default?: number; minimum?: number; maximum?: number }).default).toBe(20);
+    expect((props.max_groups as { default?: number; minimum?: number; maximum?: number }).minimum).toBe(1);
+    expect((props.max_groups as { default?: number; minimum?: number; maximum?: number }).maximum).toBe(100);
+	    expect((props.max_timers_per_group as { default?: number; minimum?: number; maximum?: number }).default).toBe(5);
+	    expect((props.max_timers_per_group as { default?: number; minimum?: number; maximum?: number }).minimum).toBe(0);
+	    expect((props.max_timers_per_group as { default?: number; minimum?: number; maximum?: number }).maximum).toBe(20);
+	    expect((props.max_related_timers as { default?: number; minimum?: number; maximum?: number }).default).toBe(3);
+	    expect((props.max_related_timers as { default?: number; minimum?: number; maximum?: number }).minimum).toBe(0);
+	    expect((props.max_related_timers as { default?: number; minimum?: number; maximum?: number }).maximum).toBe(10);
+    expect((props.max_events as { default?: number; minimum?: number; maximum?: number }).default).toBe(250000);
+    expect((props.max_events as { default?: number; minimum?: number; maximum?: number }).minimum).toBe(10000);
+    expect((props.max_events as { default?: number; minimum?: number; maximum?: number }).maximum).toBe(1000000);
+    expect((props.output_path as { description?: string }).description).toContain('raw MicroProfiler snapshot bytes');
+    expect((props.summary_output_path as { description?: string }).description).toContain('empty-baseplate');
+    expect((props.baseline_path as { description?: string }).description).toContain('current minus baseline');
+  });
+
+  test('generate_model schema exposes a brief model generation primitive', () => {
+    const tool = TOOL_DEFINITIONS.find((t) => t.name === 'generate_model');
+    expect(tool).toBeTruthy();
+    const schema = tool!.inputSchema as { properties?: Record<string, any> };
+    const props = schema.properties ?? {};
+    expect(tool!.category).toBe('write');
+    expect(Object.keys(props).sort()).toEqual([
+      'generate_textures',
+      'image_asset_id',
+      'image_base64',
+      'image_mime_type',
+      'image_path',
+      'instance_id',
+      'max_triangles',
+      'name',
+      'prompt',
+      'schema',
+      'schema_groups',
+      'size',
+      'timeout_ms',
+    ].sort());
+    expect(tool!.description).toContain('GenerateModelAsync');
+    expect(tool!.description).toContain('ServerStorage');
+    expect(tool!.description).toContain('success and modelPath');
+    expect(tool!.description).toContain('success and error');
+    expect((props.image_mime_type as { enum?: string[] }).enum).toEqual(['image/png']);
+    expect((props.schema as { enum?: string[]; default?: string }).enum).toEqual(['Body1', 'Car5']);
+    expect((props.schema as { enum?: string[]; default?: string }).default).toBe('Body1');
+    expect((props.schema_groups as { items?: unknown }).items).toBeTruthy();
+    expect((props.max_triangles as { minimum?: number }).minimum).toBe(1);
+    expect((props.timeout_ms as { minimum?: number; maximum?: number; default?: number }).minimum).toBe(1);
+    expect((props.timeout_ms as { minimum?: number; maximum?: number; default?: number }).maximum).toBe(300000);
+    expect((props.timeout_ms as { minimum?: number; maximum?: number; default?: number }).default).toBe(120000);
   });
 
   test('device simulator schemas expose target routing and matrix entries', () => {

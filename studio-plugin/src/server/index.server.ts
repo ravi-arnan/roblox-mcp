@@ -69,9 +69,9 @@ function registerToolbarButton() {
 elements.connectButton.Activated.Connect(() => {
 	const conn = State.getActiveConnection();
 	if (conn && conn.isActive) {
-		Communication.deactivatePlugin(State.getActiveTabIndex());
+		Communication.deactivatePlugin();
 	} else {
-		Communication.activatePlugin(State.getActiveTabIndex());
+		Communication.activatePlugin();
 	}
 });
 
@@ -101,9 +101,8 @@ task.delay(2, () => {
 	}
 	if (role === "edit" || role === "server") {
 		pcall(() => {
-			const idx = State.getActiveTabIndex();
-			const conn = State.getConnection(idx);
-			if (conn && !conn.isActive) {
+			const conn = State.getActiveConnection();
+			if (!conn.isActive) {
 				if (role === "server") {
 					const inheritedServerUrl = ServerUrlSettings.readServerUrl() ?? ClientBroker.DEFAULT_MCP_URL;
 					conn.serverUrl = ServerUrlSettings.normalizeServerUrl(inheritedServerUrl);
@@ -118,7 +117,7 @@ task.delay(2, () => {
 					conn.serverUrl = ClientBroker.DEFAULT_MCP_URL;
 					elements.urlInput.Text = conn.serverUrl;
 				}
-				Communication.activatePlugin(idx);
+				Communication.activatePlugin();
 			}
 		});
 	}

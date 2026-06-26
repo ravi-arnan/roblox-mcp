@@ -35,6 +35,7 @@ export interface VotingInfo {
 
 export interface AssetInfo {
   id: number;
+  textureId?: number;
   name: string;
   description?: string;
   assetTypeId?: number;

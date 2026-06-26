@@ -35,6 +35,7 @@ interface PendingRequest {
   resolve: (value: any) => void;
   reject: (error: any) => void;
   timeoutId: ReturnType<typeof setTimeout>;
+  timeoutMs: number;
 }
 
 export type RoutingErrorCode =
@@ -514,8 +515,10 @@ export class BridgeService {
     data: any,
     targetInstanceId: string,
     targetRole: string,
+    timeoutMs = this.requestTimeout,
   ): Promise<any> {
     const requestId = uuidv4();
+    const effectiveTimeoutMs = Math.max(1, timeoutMs);
 
     return new Promise((resolve, reject) => {
       const timeoutId = setTimeout(() => {
@@ -523,7 +526,7 @@ export class BridgeService {
           this.pendingRequests.delete(requestId);
           reject(new Error('Request timeout'));
         }
-      }, this.requestTimeout);
+      }, effectiveTimeoutMs);
 
       const request: PendingRequest = {
         id: requestId,
@@ -536,6 +539,7 @@ export class BridgeService {
         resolve,
         reject,
         timeoutId,
+        timeoutMs: effectiveTimeoutMs,
       };
 
       this.pendingRequests.set(requestId, request);
@@ -592,7 +596,7 @@ export class BridgeService {
   cleanupOldRequests() {
     const now = Date.now();
     for (const [id, request] of this.pendingRequests.entries()) {
-      if (now - request.timestamp > this.requestTimeout) {
+      if (now - request.timestamp > request.timeoutMs) {
         clearTimeout(request.timeoutId);
         this.pendingRequests.delete(id);
         request.reject(new Error('Request timeout'));

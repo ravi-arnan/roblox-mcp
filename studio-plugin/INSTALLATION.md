@@ -142,7 +142,8 @@ If you encounter issues, you may need to run it through `cmd`. Update your confi
 - **Debug friendly**: Comprehensive logging in Output window
 
 ### Customization
-- **Server URL**: Modify in plugin UI (default: http://localhost:58741)
+- **Server URL**: Modify the single plugin URL field (default: http://localhost:58741)
+- **Multiple Studio places**: Connect every place to the same MCP server, then use `get_connected_instances` and `instance_id` to choose the target game
 - **Poll interval**: 500ms default (editable in code)
 - **Timeout settings**: 30-second request timeouts
 

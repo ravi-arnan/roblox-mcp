@@ -44,6 +44,8 @@ Prefer manual plugin install? Run `npx -y @chrrxs/robloxstudio-mcp@latest --inst
 
 > **Custom Plugins folder?** Set `MCP_PLUGINS_DIR` before `--auto-install-plugin` or `--install-plugin`. Works on Windows, macOS, and WSL.
 
+For multiple open Studio places, connect each plugin to the same MCP server URL. The MCP server tracks every connected place; call `get_connected_instances` and pass the returned `instance_id` to route a tool call to a specific game. Per-place port tabs such as `58742` are not the supported routing model.
+
 If the Studio plugin and MCP server versions differ, the plugin stays connected but shows a yellow warning banner. `get_connected_instances`, `/health`, and `/status` also report `pluginVersion`, `serverVersion`, and `versionMismatch`.
 
 <details>
@@ -110,7 +112,7 @@ gemini mcp add robloxstudio-inspector npx --trust -- -y @chrrxs/robloxstudio-mcp
 ---
 
 <!-- VERSION_LINE -->
-**v2.18.0**
+**v2.19.0**
 
 ## Building from source
 

@@ -1476,6 +1476,133 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     }
   },
   {
+    name: 'capture_micro_profiler',
+    category: 'read',
+    description: 'Capture one short Roblox MicroProfiler sample on a running server or client peer using LibMP and return a structured CPU-time attribution dataset. Use this when the performance question is "where is the frame time going?" across scripts, physics, render, network, jobs, scheduler, GC, and engine timers. The primary data is top_groups/top_timers sorted by inclusive_us, exclusive-sorted companion lists, top_threads, top_call_edges, frame_summary, and analysis_window/data_quality so an agent can tell whether a result is steady, spiky, thread-bound, wrapper-heavy, or truncated. For baseline comparison, first capture an empty baseplate/control with the same target/settings and summary_output_path, then capture the game with baseline_path pointing at that saved JSON; saved summaries include a compact comparison_index so baseline_comparison can compare full compact aggregates instead of only visible top rows. Pass baseline inline when the previous capture is already in context. Times are reported in microseconds by converting LibMP MicroProfiler nanosecond ticks; inclusive_us is cumulative nested timer time and can overlap across timers/threads, so do not sum rows as total frame time. *_per_s fields are normalized by analysis_window.analysis_duration_us, not requested duration_ms. pct_of_analyzed_wall can exceed 100 when work overlaps. focus can restrict to script, physics, render, network, or jobs. include_idle defaults false so Sleep/idle noise is omitted. max_events bounds iterator work; event_limit_hit and partial_reasons explain when rankings are useful but partial, so narrow focus/filter or raise max_events for deeper analysis. recommended_tools is intentionally brief; the main purpose is digestible attribution data, not an agent diagnosis.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        target: {
+          type: 'string',
+          pattern: '^(server|client-[0-9]+)$',
+          description: 'Runtime peer to profile: "server" (default) or "client-N". Use get_connected_instances to discover available runtime roles.'
+        },
+        duration_ms: {
+          type: 'number',
+          default: 1000,
+          minimum: 100,
+          maximum: 5000,
+          description: 'MicroProfiler capture duration in milliseconds. Defaults to 1000; clamped to 100-5000 because decoded event streams are much larger than ScriptProfiler output.'
+        },
+        focus: {
+          type: 'string',
+          enum: ['all', 'script', 'physics', 'render', 'network', 'jobs'],
+          default: 'all',
+          description: 'Optional subsystem focus. Use "all" first for unknown bottlenecks; use a narrower focus after top_groups identifies the area.'
+        },
+        filter: {
+          type: 'string',
+          description: 'Optional case-insensitive substring matched against timer name and group after capture. Use to inspect a specific timer family such as Heartbeat, Simulation, $Script, or RbxTransport.'
+        },
+        max_timers: {
+          type: 'number',
+          default: 20,
+          minimum: 1,
+          maximum: 100,
+          description: 'Maximum number of top_timers to return. Defaults to 20.'
+        },
+        max_groups: {
+          type: 'number',
+          default: 20,
+          minimum: 1,
+          maximum: 100,
+          description: 'Maximum number of top_groups to return. Each group includes its own hot timers. Defaults to 20.'
+        },
+        max_timers_per_group: {
+          type: 'number',
+          default: 5,
+          minimum: 0,
+          maximum: 20,
+          description: 'Maximum number of nested top_timers included inside each top_groups row. Defaults to 5; use 0 to omit nested timers.'
+        },
+        max_related_timers: {
+          type: 'number',
+          default: 3,
+          minimum: 0,
+          maximum: 10,
+          description: 'Maximum per-row parent, child, and thread context entries. Defaults to 3; use 0 to omit per-row relationship context.'
+        },
+        min_total_us: {
+          type: 'number',
+          default: 0,
+          minimum: 0,
+          description: 'Omit timers below this inclusive_us threshold after idle/focus/filter processing. Defaults to 0.'
+        },
+        include_idle: {
+          type: 'boolean',
+          description: 'Include Sleep/idle timers. Defaults to false because idle time usually hides actionable engine work.'
+        },
+        include_gpu: {
+          type: 'boolean',
+          description: 'Include GPU thread events when LibMP exposes them. Defaults to false to keep CPU diagnosis focused.'
+        },
+        max_events: {
+          type: 'number',
+          default: 250000,
+          minimum: 10000,
+          maximum: 1000000,
+          description: 'Maximum LibMP log events to walk. Defaults to 250000; raise for deeper captures or lower to keep quick iterations snappy.'
+        },
+        frame_window: {
+          type: 'number',
+          default: 240,
+          minimum: 1,
+          maximum: 2000,
+          description: 'Analyze only the last N MicroProfiler frames from the snapshot. Defaults to 240.'
+        },
+        output_path: {
+          type: 'string',
+          description: 'Optional local path where the MCP server writes the raw MicroProfiler snapshot bytes. The normal response stays summarized.'
+        },
+        summary_output_path: {
+          type: 'string',
+          description: 'Optional local path where the MCP server writes the summarized JSON response, including a compact comparison_index. Use this to save an empty-baseplate/control capture for later baseline_path comparison.'
+        },
+        baseline_path: {
+          type: 'string',
+          description: 'Optional local path to a prior capture_micro_profiler summarized JSON response. The tool adds baseline_comparison using current minus baseline, normalized by capture duration.'
+        },
+        baseline: {
+          type: 'object',
+          description: 'Optional inline prior capture_micro_profiler summarized response to compare against. Prefer baseline_path for large captures.'
+        },
+        baseline_label: {
+          type: 'string',
+          description: 'Label used for the baseline side of baseline_comparison, such as "empty_baseplate".'
+        },
+        current_label: {
+          type: 'string',
+          description: 'Label used for the current capture side of baseline_comparison, such as the game or scenario name.'
+        },
+        max_comparison_rows: {
+          type: 'number',
+          default: 20,
+          minimum: 1,
+          maximum: 100,
+          description: 'Maximum delta rows returned per baseline_comparison section: groups, timers, threads, and call_edges. Defaults to 20.'
+        },
+        include_comparison_index: {
+          type: 'boolean',
+          description: 'Include the full compact comparison_index in the normal response. Defaults to false; summary_output_path still saves it for baseline comparison.'
+        },
+        instance_id: {
+          type: 'string',
+          description: 'Which connected Studio place to target. Required when multiple places are connected; omit when one. Use get_connected_instances to list available IDs.'
+        }
+      }
+    }
+  },
+  {
     name: 'breakpoints',
     category: 'write',
     description: 'Manage Studio debugger breakpoints through ScriptDebuggerService. Use this when the user asks to debug with Studio breakpoints. Prefer log breakpoints for agent debugging: pass log_message and let continue_execution default to true, reproduce the issue, then read get_runtime_logs filtered by "Breakpoint". Minimal flow: set a log breakpoint, run or trigger the behavior, call get_runtime_logs with filter="Breakpoint", then call action="clear" to remove MCP-managed breakpoints. Generated breakpoint logs are prefixed with "Breakpoint" plus script_path:line; Studio breakpoint errors also start with "Breakpoint", so this filter captures both successful breakpoint logs and breakpoint-related failures. Set breakpoints on target="edit" before starting a playtest when possible; for an already-running playtest target the runtime DataModel directly, such as "server" or "client-1". Do not set continue_execution=false unless the target DataModel already has a ScriptDebuggerService.OnStopped handler that returns Enum.DebuggerResumeType.Resume for breakpoint/non-exception stops; otherwise the playtest can get stuck and MCP can lose the server/client peers. Minimal OnStopped reference: local sds=game:GetService("ScriptDebuggerService"); sds.OnStopped=function(info) if info.Reason ~= Enum.ScriptStoppedReason.Exception then return Enum.DebuggerResumeType.Resume end print("EXCEPTION:", info.ExceptionText); return Enum.DebuggerResumeType.Resume end. MCP-managed breakpoints persist minimal script_path/line recovery data per place and target so action="list" and action="clear" can find tool-created edit/server/client breakpoints after MCP/plugin reloads. action="clear" removes only breakpoints created through this MCP tool by default; pass clear_all=true only when you intentionally want to clear every Studio breakpoint in the targeted DataModel, including user-created breakpoints. This tool only manages breakpoint lifecycle; it does not pause, resume, step, inspect variables, or install OnStopped callbacks. Requires Studio Debugger Luau API beta enabled.',
@@ -1977,6 +2104,81 @@ part(0,2,0,2,1,1,"b")`,
         }
       },
       required: ['assetId']
+    }
+  },
+  {
+    name: 'generate_model',
+    category: 'write',
+    description: 'Generate a Roblox Model with GenerationService:GenerateModelAsync from a prompt, a Roblox image asset ID, a PNG reference image, or prompt+image. The tool only creates and stages the generated model under ServerStorage; use ordinary instance tools afterward if you want to parent, position, scale, anchor, or integrate it into the world. Provide exactly one of image_path, image_base64, or image_asset_id when using an image. Roblox requires image inputs as rbxassetid/rbxasset URIs, so image_path and image_base64 are uploaded as Roblox Decal/Image assets first using configured upload credentials; pass image_asset_id to use an existing asset without uploading. schema defaults to Body1 for a single mesh output; use schema_groups for custom segmentation such as Body plus named wheel/finger/limb groups. Output is intentionally brief: success returns only success and modelPath; failure returns only success and error.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        prompt: {
+          type: 'string',
+          description: 'Text prompt describing the model to generate. Required unless an image input is provided.'
+        },
+        image_path: {
+          type: 'string',
+          description: 'Local PNG file path for a visual reference image. Uploaded as a Roblox Decal/Image asset before generation. Mutually exclusive with image_base64 and image_asset_id.'
+        },
+        image_base64: {
+          type: 'string',
+          description: 'Base64-encoded PNG reference image bytes. Requires image_mime_type="image/png" and is uploaded as a Roblox Decal/Image asset before generation. Mutually exclusive with image_path and image_asset_id.'
+        },
+        image_mime_type: {
+          type: 'string',
+          enum: ['image/png'],
+          description: 'Required when image_base64 is provided. Currently only image/png is supported.'
+        },
+        image_asset_id: {
+          type: 'number',
+          description: 'Existing Roblox image asset ID used as a visual reference. Mutually exclusive with image_path and image_base64.'
+        },
+        schema: {
+          type: 'string',
+          enum: ['Body1', 'Car5'],
+          default: 'Body1',
+          description: 'Built-in GenerationService schema. Defaults to Body1 for one generated mesh. Use Car5 only for a five-part vehicle chassis.'
+        },
+        schema_groups: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Custom SchemaDefinition.Groups part names that define generated model segmentation, such as ["Body","Front Left Wheel","Front Right Wheel","Rear Left Wheel","Rear Right Wheel"]. Mutually exclusive with schema.'
+        },
+        name: {
+          type: 'string',
+          description: 'Optional name for the generated Model under game.ServerStorage.__MCPGeneratedModels.'
+        },
+        size: {
+          type: 'object',
+          properties: {
+            x: { type: 'number' },
+            y: { type: 'number' },
+            z: { type: 'number' }
+          },
+          description: 'Optional approximate generated object size. GenerationService may not match it exactly.'
+        },
+        max_triangles: {
+          type: 'number',
+          minimum: 1,
+          description: 'Optional maximum triangle count. Lower values produce more faceted/low-poly results.'
+        },
+        generate_textures: {
+          type: 'boolean',
+          description: 'Whether GenerationService should generate textures. Defaults to Roblox behavior (true).'
+        },
+        timeout_ms: {
+          type: 'number',
+          minimum: 1,
+          maximum: 300000,
+          default: 120000,
+          description: 'Maximum MCP bridge wait for this generation request. Defaults to 120000ms.'
+        },
+        instance_id: {
+          type: 'string',
+          description: 'Which connected Studio place to target. Required when multiple places are connected; omit when one. Use get_connected_instances to list available IDs.'
+        }
+      }
     }
   },
   {

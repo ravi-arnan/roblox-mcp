@@ -43,6 +43,8 @@ const ROUTED_TOOLS = new Set([
   'multiplayer_test_leave_client',
   'multiplayer_test_end',
   'capture_screenshot',
+  'capture_micro_profiler',
+  'generate_model',
   'simulate_mouse_input',
   'simulate_keyboard_input',
 ]);
