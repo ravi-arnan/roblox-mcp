@@ -1670,6 +1670,7 @@ export class RobloxStudioTools {
     options?: {
       caseSensitive?: boolean;
       usePattern?: boolean;
+      isRegex?: boolean;
       contextLines?: number;
       maxResults?: number;
       maxResultsPerScript?: number;
@@ -1682,9 +1683,12 @@ export class RobloxStudioTools {
     if (!pattern) {
       throw new Error('Pattern is required for grep_scripts');
     }
+    // `isRegex` is an accepted alias for `usePattern`.
+    const { isRegex, ...rest } = options ?? {};
     const response = await this._callSingle('/api/grep-scripts', {
       pattern,
-      ...options
+      ...rest,
+      usePattern: rest.usePattern ?? isRegex,
     }, undefined, instance_id);
     return {
       content: [
@@ -3268,11 +3272,17 @@ export class RobloxStudioTools {
     if (action === 'start') {
       const body = this._parseTextResult(await this.multiplayerTestStart(numPlayers as number, testArgs, timeout, instance_id));
       const state = body.state && typeof body.state === 'object' ? body.state as Record<string, any> : {};
-      const success = body.success === true && body.ready === true;
-      return this._textResult(success ? {
+      // The session is a success once it has launched, even if not every peer has
+      // registered yet (readiness). A false "timeout" while the test is actually
+      // running was a long-standing source of confusion.
+      const launched = body.success === true && (body.ready === true || body.launched === true);
+      return this._textResult(launched ? {
         success: true,
         action,
-        message: 'Multiplayer playtest started.',
+        message: body.ready === true
+          ? 'Multiplayer playtest started.'
+          : 'Multiplayer playtest launched; peers still registering. Use multiplayer_playtest action="status" to confirm readiness.',
+        ready: body.ready === true,
         roles: Array.isArray(body.roles) ? body.roles : undefined,
         clientRoles: Array.isArray(state.clientRoles) ? state.clientRoles : undefined,
         playerCount: typeof state.playerCount === 'number' ? state.playerCount : undefined,
@@ -3329,7 +3339,12 @@ export class RobloxStudioTools {
     return this._textResult(body.success === true && body.ended === true ? {
       success: true,
       action,
-      message: 'Multiplayer playtest ended.',
+      message: body.alreadyEnded === true
+        ? 'Multiplayer playtest already ended.'
+        : (body.teardownConfirmed === false
+          ? 'Multiplayer playtest end requested; teardown still in progress. Use multiplayer_playtest action="status" to confirm.'
+          : 'Multiplayer playtest ended.'),
+      teardownConfirmed: body.teardownConfirmed === true,
     } : {
       success: false,
       action,
@@ -3355,7 +3370,11 @@ export class RobloxStudioTools {
       return { content: [{ type: 'text', text: JSON.stringify(response) }] };
     }
 
-    const wait = await this._waitForMultiplayerStart(editTarget.instanceId, numPlayers, timeout ?? 30);
+    const wait = await this._waitForMultiplayerStart(editTarget.instanceId, numPlayers, timeout ?? 60);
+    // A heavy place can take longer than the readiness window to register every
+    // peer; readiness timing out does NOT mean the test failed to launch. Treat
+    // an actually-running session as launched so callers don't see a false failure.
+    const launched = wait.ok || await this._isMultiplayerTestRunning(editTarget.instanceId);
     const state = await this._buildMultiplayerState(editTarget.instanceId);
     return {
       content: [{
@@ -3363,6 +3382,7 @@ export class RobloxStudioTools {
         text: JSON.stringify({
           ...response,
           ready: wait.ok,
+          launched,
           timedOut: wait.timedOut,
           wait,
           roles: wait.roles,
@@ -3445,7 +3465,33 @@ export class RobloxStudioTools {
   }
 
   async multiplayerTestEnd(value?: unknown, timeout?: number, instance_id?: string) {
-    const serverTarget = this._resolveSingleTarget('server', instance_id);
+    let serverTarget: { instanceId: string; role: string };
+    try {
+      serverTarget = this._resolveSingleTarget('server', instance_id);
+    } catch (err) {
+      // No running server peer to receive EndTest. If no runtime peers remain at
+      // all, the multiplayer test is already torn down — report it ended rather
+      // than failing on target resolution.
+      const instanceId = this._resolveInstanceIdOnly(instance_id);
+      const hasRuntime = this._rolesForInstance(instanceId).some(
+        (role) => role === 'server' || /^client-\d+$/.test(role),
+      );
+      if (!hasRuntime) {
+        return {
+          content: [{
+            type: 'text',
+            text: JSON.stringify({
+              success: true,
+              ended: true,
+              alreadyEnded: true,
+              teardownConfirmed: true,
+              message: 'No active multiplayer test to end (already ended).',
+            }),
+          }],
+        };
+      }
+      throw err;
+    }
     const response = await this.client.request(
       '/api/multiplayer-test-end',
       { value: value ?? 'ended_by_mcp' },
@@ -3467,7 +3513,12 @@ export class RobloxStudioTools {
         type: 'text',
         text: JSON.stringify({
           ...response,
-          ended: wait.ok,
+          // EndTest was accepted by the server peer => the test is ending. Full
+          // teardown (all runtime peers gone) is reported separately via
+          // teardownConfirmed and does NOT gate success, since teardown can
+          // outlast the wait window.
+          ended: response.success === true,
+          teardownConfirmed: wait.ok,
           editDone,
           timedOut: wait.timedOut,
           roles: wait.roles,

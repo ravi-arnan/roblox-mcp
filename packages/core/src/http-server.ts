@@ -22,6 +22,37 @@ interface StreamableHttpConfig {
 
 export type ToolHandler = (tools: RobloxStudioTools, body: any) => Promise<any>;
 
+/**
+ * Normalize a convenience `lineRange` value into [startLine, endLine].
+ * Accepts an array ([start, end]), a single number, or a string such as
+ * "100-200", "100:200", open-ended "100-" / "-200", or a single "42".
+ * Returns undefined when nothing usable is present.
+ */
+export function parseLineRange(lineRange: unknown): [number | undefined, number | undefined] | undefined {
+  if (Array.isArray(lineRange)) {
+    const s = typeof lineRange[0] === 'number' ? lineRange[0] : undefined;
+    const e = typeof lineRange[1] === 'number' ? lineRange[1] : undefined;
+    return s !== undefined || e !== undefined ? [s, e] : undefined;
+  }
+  if (typeof lineRange === 'number') {
+    return [lineRange, lineRange];
+  }
+  if (typeof lineRange === 'string') {
+    const ranged = lineRange.match(/^\s*(\d+)?\s*[-:]\s*(\d+)?\s*$/);
+    if (ranged) {
+      const s = ranged[1] !== undefined ? parseInt(ranged[1], 10) : undefined;
+      const e = ranged[2] !== undefined ? parseInt(ranged[2], 10) : undefined;
+      if (s !== undefined || e !== undefined) return [s, e];
+    }
+    const single = lineRange.match(/^\s*(\d+)\s*$/);
+    if (single) {
+      const n = parseInt(single[1], 10);
+      return [n, n];
+    }
+  }
+  return undefined;
+}
+
 export const TOOL_HANDLERS: Record<string, ToolHandler> = {
   get_file_tree: (tools, body) => tools.getFileTree(body.path, body.instance_id),
   search_files: (tools, body) => tools.searchFiles(body.query, body.searchType, body.instance_id),
@@ -44,7 +75,8 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
   mass_duplicate: (tools, body) => tools.massDuplicate(body.duplications, body.instance_id),
   grep_scripts: (tools, body) => tools.grepScripts(body.pattern, {
     caseSensitive: body.caseSensitive,
-    usePattern: body.usePattern,
+    // `isRegex` is an accepted alias for `usePattern` (Lua pattern matching).
+    usePattern: body.usePattern ?? body.isRegex,
     contextLines: body.contextLines,
     maxResults: body.maxResults,
     maxResultsPerScript: body.maxResultsPerScript,
@@ -52,7 +84,19 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
     path: body.path,
     classFilter: body.classFilter,
   }, body.instance_id),
-  get_script_source: (tools, body) => tools.getScriptSource(body.instancePath, body.startLine, body.endLine, body.instance_id),
+  get_script_source: (tools, body) => {
+    let startLine = body.startLine;
+    let endLine = body.endLine;
+    // Accept a convenience `lineRange` when explicit start/end aren't provided.
+    if (startLine === undefined && endLine === undefined && body.lineRange !== undefined) {
+      const parsed = parseLineRange(body.lineRange);
+      if (parsed) {
+        startLine = parsed[0];
+        endLine = parsed[1];
+      }
+    }
+    return tools.getScriptSource(body.instancePath, startLine, endLine, body.instance_id);
+  },
   set_script_source: (tools, body) => tools.setScriptSource(body.instancePath, body.source, body.instance_id),
   edit_script_lines: (tools, body) => tools.editScriptLines(body.instancePath, body.old_string, body.new_string, body.startLine, body.instance_id),
   insert_script_lines: (tools, body) => tools.insertScriptLines(body.instancePath, body.afterLine, body.newContent, body.instance_id),

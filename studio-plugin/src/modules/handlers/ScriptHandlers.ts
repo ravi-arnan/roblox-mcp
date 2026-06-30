@@ -78,10 +78,21 @@ function getScriptSource(requestData: Record<string, unknown>) {
 			truncated: false,
 		};
 
-		if (startLine === undefined && endLine === undefined && fullSource.size() > 50000) {
+		// Safety cap for range-less reads: a whole large script easily exceeds
+		// the caller's token budget. Truncate on either a character OR a line
+		// budget so callers get a usable head instead of an oversized dump, and
+		// tell them how to read the rest.
+		const TRUNCATE_CHAR_BUDGET = 25000;
+		const TRUNCATE_LINE_BUDGET = 400;
+		const TRUNCATE_TO_LINES = 300;
+		if (
+			startLine === undefined &&
+			endLine === undefined &&
+			(fullSource.size() > TRUNCATE_CHAR_BUDGET || totalLineCount > TRUNCATE_LINE_BUDGET)
+		) {
 			const truncatedLines: string[] = [];
 			const truncatedNumberedLines: string[] = [];
-			const maxLines = math.min(1000, lines.size());
+			const maxLines = math.min(TRUNCATE_TO_LINES, lines.size());
 			for (let i = 0; i < maxLines; i++) {
 				truncatedLines.push(lines[i]);
 				truncatedNumberedLines.push(`${i + 1}: ${lines[i]}`);
@@ -90,7 +101,7 @@ function getScriptSource(requestData: Record<string, unknown>) {
 			resp.numberedSource = truncatedNumberedLines.join("\n");
 			resp.truncated = true;
 			resp.endLine = maxLines;
-			resp.note = "Script truncated to first 1000 lines. Use startLine/endLine parameters to read specific sections.";
+			resp.note = `Script truncated to first ${maxLines} of ${totalLineCount} lines (${fullSource.size()} chars). Use startLine/endLine (or the lineRange shorthand) to read specific sections.`;
 		}
 
 		if (instance.IsA("BaseScript")) {

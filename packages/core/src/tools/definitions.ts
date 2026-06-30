@@ -552,7 +552,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: 'get_script_source',
     category: 'read',
-    description: 'Get script source. Returns "source" and "numberedSource" (line-numbered). Use startLine/endLine for large scripts.',
+    description: 'Get script source. Returns "source" and "numberedSource" (line-numbered). Pass a range for large scripts via startLine/endLine or the lineRange shorthand; without a range, large scripts are truncated (see the "truncated" flag and "note") to avoid flooding the context.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -567,6 +567,10 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         endLine: {
           type: 'number',
           description: 'End line (inclusive)'
+        },
+        lineRange: {
+          type: 'string',
+          description: 'Shorthand for startLine/endLine: "start-end" (e.g. "100-200"), open-ended ("100-" or "-200"), or a single line ("42"). Ignored when startLine/endLine are provided.'
         },
         instance_id: {
           type: 'string',
@@ -932,13 +936,13 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: 'grep_scripts',
     category: 'read',
-    description: 'Ripgrep-inspired search across all script sources. Supports literal and Lua pattern matching, context lines, early termination, and results grouped by script with line/column numbers.',
+    description: 'Ripgrep-inspired search across all script sources. Supports literal and Lua pattern matching (with top-level "|" alternation), context lines, early termination, and results grouped by script with line/column numbers.',
     inputSchema: {
       type: 'object',
       properties: {
         pattern: {
           type: 'string',
-          description: 'Search pattern (literal string or Lua pattern)'
+          description: 'Search pattern. Literal by default; with usePattern/isRegex it is a Lua pattern with top-level "|" alternation (e.g. "foo|bar").'
         },
         caseSensitive: {
           type: 'boolean',
@@ -946,7 +950,11 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         },
         usePattern: {
           type: 'boolean',
-          description: 'Use Lua pattern matching instead of literal (default: false)'
+          description: 'Use Lua pattern matching instead of literal (default: false). Supports top-level alternation: "a|b" matches a line containing "a" or "b". Note: Lua patterns are NOT PCRE — use %d/%a/%w classes and ".-" (not ".*?"); ^ $ ( ) . % + - * ? [ ] are magic.'
+        },
+        isRegex: {
+          type: 'boolean',
+          description: 'Alias for usePattern. Enables Lua pattern matching with top-level "|" alternation.'
         },
         contextLines: {
           type: 'number',
