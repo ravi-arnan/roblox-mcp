@@ -254,12 +254,12 @@ async function runEditModeToolSmoke(client, instanceId) {
   }
 }
 
-function runLiveRegressionSuite() {
+function runLiveRegressionSuite(instanceId) {
   console.log('\n=== existing live Studio regression suite ===');
   return new Promise((resolve, reject) => {
     const proc = spawn('node', ['tests/run-all.mjs'], {
       cwd: REPO_ROOT,
-      env: { ...process.env, ...SERVER_ENV },
+      env: { ...process.env, ...SERVER_ENV, MCP_INSTANCE_ID: instanceId },
       stdio: 'inherit',
     });
     proc.on('exit', (code) => {
@@ -300,7 +300,7 @@ async function main() {
     instanceId = await launchManagedPlace(client);
     const edit = await waitForEditInstance(client, version, instanceId);
     await runEditModeToolSmoke(client, edit.instanceId);
-    await runLiveRegressionSuite();
+    await runLiveRegressionSuite(edit.instanceId);
   } finally {
     if (client && instanceId) {
       await closeManagedInstance(client, instanceId).catch((err) => {
