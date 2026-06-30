@@ -141,7 +141,6 @@ describe('Smoke', () => {
       action: 'launch',
       source: 'published_place',
       place_id: 123,
-      universe_id: 456,
       wait_for_connection: false,
     });
 
@@ -171,12 +170,12 @@ describe('Smoke', () => {
       list: () => [],
       launch,
     };
+    jest.spyOn(tools as any, '_deriveUniverseId').mockResolvedValue(456);
 
     const result = await tools.manageInstance({
       action: 'launch',
       source: 'place_revision',
       place_id: 123,
-      universe_id: 456,
       place_version: 7,
       wait_for_connection: false,
     });
@@ -189,6 +188,40 @@ describe('Smoke', () => {
       placeId: 123,
       universeId: 456,
       placeVersion: 7,
+    });
+  });
+
+  test('manage_instance baseplate launch does not parse non-dependent launch inputs', async () => {
+    const bridge = new BridgeService();
+    const tools = new RobloxStudioTools(bridge);
+    const launch = jest.fn(async (options) => ({
+      ...options,
+      exe: 'RobloxStudioBeta.exe',
+      args: [],
+      launchedAt: Date.now(),
+    }));
+    (tools as any).instanceManager = {
+      list: () => [],
+      launch,
+    };
+
+    const result = await tools.manageInstance({
+      action: 'launch',
+      source: 'baseplate',
+      place_id: 'not-needed',
+      place_version: 'not-needed',
+      universe_id: 'not-accepted',
+      wait_for_connection: false,
+    });
+
+    const body = JSON.parse(result.content[0].text);
+    expect(body).toEqual({ message: 'Studio launch requested.' });
+    expect(launch).toHaveBeenCalledWith({
+      source: 'baseplate',
+      localPlaceFile: undefined,
+      placeId: undefined,
+      universeId: undefined,
+      placeVersion: undefined,
     });
   });
 
@@ -568,9 +601,29 @@ describe('Smoke', () => {
       }],
       next_page_token: 'next',
     });
+
+    await tools.manageInstance({
+      action: 'list_place_versions',
+      place_id: 123,
+      max_page_size: 0,
+    });
+    expect(listAssetVersions).toHaveBeenLastCalledWith(123, 1, undefined);
+
+    await tools.manageInstance({
+      action: 'list_place_versions',
+      place_id: 123,
+      max_page_size: -10,
+    });
+    expect(listAssetVersions).toHaveBeenLastCalledWith(123, 1, undefined);
+
+    await expect(tools.manageInstance({
+      action: 'list_place_versions',
+      place_id: 123,
+      max_page_size: 'bad',
+    })).rejects.toThrow('max_page_size must be a finite number.');
   });
 
-  test('studio launch args use the documented place revision task', () => {
+  test('studio launch args use the documented place revision task with derived universe id', () => {
     expect(buildStudioLaunchArgs({
       source: 'place_revision',
       placeId: 123,

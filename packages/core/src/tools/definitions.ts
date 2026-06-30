@@ -978,7 +978,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: 'manage_instance',
     category: 'write',
-    description: 'Launch, close, inspect, and find revisions for Studio instances. Use action="list_place_versions" with place_id to retrieve version numbers through Open Cloud asset versions, then action="launch" with source="place_revision" and place_version to open an older revision. action="close" can close an MCP-managed instance or an explicitly connected edit instance by instance_id. action="launch" source="published_place" opens the latest published place and is blocked if that place_id is already connected; source="place_revision" is allowed because Studio opens explicit past revisions as anonymous local copies. Requires ROBLOX_OPEN_CLOUD_API_KEY with asset:read for list_place_versions.',
+    description: 'Launch, close, inspect, and find revisions for Studio instances. Use action="launch" with source="baseplate" for a blank place, or source="local_file" with local_place_file for a local place; neither uses place_id. Use action="list_place_versions" with place_id to retrieve version numbers through Open Cloud asset versions, then action="launch" with source="place_revision", place_id, and place_version to open an older revision. action="close" can close an MCP-managed instance or an explicitly connected edit instance by instance_id. action="launch" source="published_place" opens the latest published place and is blocked if that place_id is already connected; source="place_revision" is allowed because Studio opens explicit past revisions as anonymous local copies. Requires ROBLOX_OPEN_CLOUD_API_KEY with asset:read for list_place_versions.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -990,7 +990,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         source: {
           type: 'string',
           enum: ['baseplate', 'local_file', 'published_place', 'place_revision'],
-          description: 'Required for action="launch". published_place opens the latest place; place_revision opens a specific older version as an anonymous local copy.'
+          description: 'Required for action="launch". baseplate/local_file do not use place_id; published_place opens the latest place; place_revision opens a specific older version as an anonymous local copy.'
         },
         local_place_file: {
           type: 'string',
@@ -998,11 +998,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         },
         place_id: {
           type: 'number',
-          description: 'Required for source="published_place", source="place_revision", and action="list_place_versions".'
-        },
-        universe_id: {
-          type: 'number',
-          description: 'Optional for published_place/place_revision launches; derived from place_id when omitted.'
+          description: 'Only used for source="published_place", source="place_revision", and action="list_place_versions". Do not pass for source="baseplate" or source="local_file".'
         },
         place_version: {
           type: 'number',

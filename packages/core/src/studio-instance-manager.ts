@@ -283,11 +283,11 @@ export function buildStudioLaunchArgs(options: StudioLaunchOptions): string[] {
       return ['--task', 'EditFile', '--localPlaceFile', options.localPlaceFile];
     case 'published_place':
       if (!options.placeId) throw new Error('place_id is required when source="published_place".');
-      if (!options.universeId) throw new Error('universe_id is required when source="published_place".');
+      if (!options.universeId) throw new Error('Derived universe id is required when source="published_place".');
       return ['--task', 'EditPlace', '--placeId', String(options.placeId), '--universeId', String(options.universeId)];
     case 'place_revision':
       if (!options.placeId) throw new Error('place_id is required when source="place_revision".');
-      if (!options.universeId) throw new Error('universe_id is required when source="place_revision".');
+      if (!options.universeId) throw new Error('Derived universe id is required when source="place_revision".');
       if (!options.placeVersion) throw new Error('place_version is required when launching source="place_revision".');
       return [
         '--task', 'EditPlaceRevision',

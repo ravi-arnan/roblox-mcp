@@ -2684,6 +2684,14 @@ export class RobloxStudioTools {
     return this._positiveInteger(value, name);
   }
 
+  private _optionalFiniteNumber(value: unknown, name: string): number | undefined {
+    if (value === undefined || value === null) return undefined;
+    if (typeof value !== 'number' || !Number.isFinite(value)) {
+      throw new Error(`${name} must be a finite number.`);
+    }
+    return value;
+  }
+
   private _publicInstanceKey(instance: PublicPluginInstance): string {
     return `${instance.instanceId}:${instance.role}:${instance.connectedAt}`;
   }
@@ -2714,11 +2722,11 @@ export class RobloxStudioTools {
     const response = await fetch(`https://apis.roblox.com/universes/v1/places/${placeId}/universe`);
     if (!response.ok) {
       const body = await response.text().catch(() => '');
-      throw new Error(`Could not derive universe_id for place ${placeId} (${response.status}): ${body}`);
+      throw new Error(`Could not resolve the universe for place_id ${placeId} (${response.status}): ${body}`);
     }
     const data = await response.json() as { universeId?: number };
     if (typeof data.universeId !== 'number' || !Number.isFinite(data.universeId)) {
-      throw new Error(`Could not derive universe_id for place ${placeId}.`);
+      throw new Error(`Could not resolve the universe for place_id ${placeId}.`);
     }
     return Math.trunc(data.universeId);
   }
@@ -2782,7 +2790,7 @@ export class RobloxStudioTools {
         });
       }
       const placeId = this._positiveInteger(request.place_id, 'place_id');
-      const rawMaxPageSize = this._optionalPositiveInteger(request.max_page_size, 'max_page_size') ?? 10;
+      const rawMaxPageSize = Math.trunc(this._optionalFiniteNumber(request.max_page_size, 'max_page_size') ?? 10);
       const maxPageSize = Math.max(1, Math.min(50, rawMaxPageSize));
       const pageToken = typeof request.page_token === 'string' ? request.page_token : undefined;
       const response = await this.openCloudClient.listAssetVersions(placeId, maxPageSize, pageToken);
@@ -2906,10 +2914,10 @@ export class RobloxStudioTools {
     const launchSource = source as StudioLaunchSource;
     const placeId = launchSource === 'published_place' || launchSource === 'place_revision'
       ? this._positiveInteger(request.place_id, 'place_id')
-      : this._optionalPositiveInteger(request.place_id, 'place_id');
+      : undefined;
     const placeVersion = launchSource === 'place_revision'
       ? this._positiveInteger(request.place_version, 'place_version')
-      : this._optionalPositiveInteger(request.place_version, 'place_version');
+      : undefined;
     const localPlaceFile = typeof request.local_place_file === 'string' ? request.local_place_file : undefined;
 
     if (launchSource === 'published_place' && placeId !== undefined && this._isLatestPublishedPlaceOpen(placeId)) {
@@ -2920,8 +2928,8 @@ export class RobloxStudioTools {
     }
 
     const universeId = launchSource === 'published_place' || launchSource === 'place_revision'
-      ? this._optionalPositiveInteger(request.universe_id, 'universe_id') ?? await this._deriveUniverseId(placeId as number)
-      : this._optionalPositiveInteger(request.universe_id, 'universe_id');
+      ? await this._deriveUniverseId(placeId as number)
+      : undefined;
     const waitForConnection = request.wait_for_connection !== false;
     const timeoutMs = this._optionalPositiveInteger(request.timeout_ms, 'timeout_ms') ?? 120000;
     const beforeKeys = new Set(this.bridge.getPublicInstances().map((instance) => this._publicInstanceKey(instance)));

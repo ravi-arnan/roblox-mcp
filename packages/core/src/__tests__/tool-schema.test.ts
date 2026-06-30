@@ -310,9 +310,9 @@ describe('Tool schema compatibility', () => {
       'place_version',
       'source',
       'timeout_ms',
-      'universe_id',
       'wait_for_connection',
     ].sort());
+    expect(props.universe_id).toBeUndefined();
     expect(schema.required).toEqual(['action']);
     expect(tool!.description).toContain('list_place_versions');
     expect(tool!.description).toContain('place_revision');
