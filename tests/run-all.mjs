@@ -12,6 +12,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const TESTS = [
   'path-resolution.mjs',
+  'property-value-conversion.mjs',
   'eval-bridge-error-preservation.mjs',
   'eval-context-routing.mjs',
   'runtime-bridge-lifecycle.mjs',

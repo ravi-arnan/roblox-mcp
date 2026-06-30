@@ -305,6 +305,23 @@ function convertPropertyValue(instance: Instance, propertyName: string, property
 					yTbl.Scale ?? 0, yTbl.Offset ?? 0,
 				);
 			}
+			const [success, currentVal] = pcall(() => inst[propertyName]);
+			if (success) {
+				const currentType = typeOf(currentVal);
+				if (currentType === "Vector2") {
+					return new Vector2(
+						(tbl.X as number) ?? 0,
+						(tbl.Y as number) ?? 0,
+					);
+				}
+				if (currentType === "Vector3") {
+					return new Vector3(
+						(tbl.X as number) ?? 0,
+						(tbl.Y as number) ?? 0,
+						(tbl.Z as number) ?? 0,
+					);
+				}
+			}
 			return new Vector3(
 				(tbl.X as number) ?? 0,
 				(tbl.Y as number) ?? 0,

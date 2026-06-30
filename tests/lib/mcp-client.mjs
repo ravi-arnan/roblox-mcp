@@ -302,6 +302,7 @@ export async function runTest(name, main) {
       console.error(`\n--- ${c.label} stderr tail ---`);
       console.error(c.recentStderr(10));
     }
+    process.exitCode = 1;
     return false;
   } finally {
     for (const c of clients) await c.stop();
