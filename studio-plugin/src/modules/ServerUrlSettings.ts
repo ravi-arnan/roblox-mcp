@@ -41,7 +41,7 @@ function addUnique(values: string[], value: string): void {
 	}
 }
 
-function computeInstanceIds(): string[] {
+function computeInstanceIds(options?: { createAnonymous?: boolean }): string[] {
 	const ids: string[] = [];
 	if (game.PlaceId !== 0) {
 		addUnique(ids, `place:${tostring(game.PlaceId)}`);
@@ -49,7 +49,7 @@ function computeInstanceIds(): string[] {
 	const existing = ServerStorage.GetAttribute("__MCPPlaceId");
 	if (typeIs(existing, "string") && existing !== "") {
 		addUnique(ids, `anon:${existing as string}`);
-	} else if (game.PlaceId === 0) {
+	} else if (game.PlaceId === 0 && options?.createAnonymous === true) {
 		const fresh = HttpService.GenerateGUID(false);
 		pcall(() => ServerStorage.SetAttribute("__MCPPlaceId", fresh));
 		addUnique(ids, `anon:${fresh}`);
@@ -83,7 +83,7 @@ function rememberServerUrl(serverUrl: string): void {
 	const normalized = normalizeServerUrl(serverUrl);
 	if (!pluginRef || normalized === "") return;
 	writeSettingString(GLOBAL_SETTING_KEY, normalized);
-	for (const instanceId of computeInstanceIds()) {
+	for (const instanceId of computeInstanceIds({ createAnonymous: true })) {
 		writeSettingString(settingKey(instanceId), normalized);
 		writeSettingString(legacySettingKey(instanceId), normalized);
 	}
@@ -91,6 +91,9 @@ function rememberServerUrl(serverUrl: string): void {
 
 function readServerUrl(): string | undefined {
 	if (!pluginRef) return undefined;
+	// Reading settings should not mint a place identity. Client play DMs have
+	// their own ServerStorage; creating an id there makes a misleading anon id
+	// that never matches the edit/server bridge identity.
 	for (const instanceId of computeInstanceIds()) {
 		const remembered = readSettingString(settingKey(instanceId));
 		if (remembered !== undefined) return remembered;

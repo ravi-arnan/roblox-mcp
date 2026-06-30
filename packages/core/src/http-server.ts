@@ -22,35 +22,59 @@ interface StreamableHttpConfig {
 
 export type ToolHandler = (tools: RobloxStudioTools, body: any) => Promise<any>;
 
+type ParsedLineRange = {
+  startLine?: number;
+  endLine?: number;
+};
+
 /**
- * Normalize a convenience `lineRange` value into [startLine, endLine].
- * Accepts an array ([start, end]), a single number, or a string such as
- * "100-200", "100:200", open-ended "100-" / "-200", or a single "42".
+ * Normalize a line_range string into internal [startLine, endLine] coordinates.
+ * Accepts "100-200", "100:200", open-ended "100-" / "-200", or a single "42".
  * Returns undefined when nothing usable is present.
  */
-export function parseLineRange(lineRange: unknown): [number | undefined, number | undefined] | undefined {
-  if (Array.isArray(lineRange)) {
-    const s = typeof lineRange[0] === 'number' ? lineRange[0] : undefined;
-    const e = typeof lineRange[1] === 'number' ? lineRange[1] : undefined;
-    return s !== undefined || e !== undefined ? [s, e] : undefined;
-  }
-  if (typeof lineRange === 'number') {
-    return [lineRange, lineRange];
-  }
+export function parseLineRange(lineRange: unknown): ParsedLineRange | undefined {
+  const validLine = (line: number | undefined) => line === undefined || line >= 1;
   if (typeof lineRange === 'string') {
     const ranged = lineRange.match(/^\s*(\d+)?\s*[-:]\s*(\d+)?\s*$/);
     if (ranged) {
       const s = ranged[1] !== undefined ? parseInt(ranged[1], 10) : undefined;
       const e = ranged[2] !== undefined ? parseInt(ranged[2], 10) : undefined;
-      if (s !== undefined || e !== undefined) return [s, e];
+      if (!validLine(s) || !validLine(e)) return undefined;
+      if (s !== undefined && e !== undefined && s > e) return undefined;
+      if (s !== undefined || e !== undefined) return { startLine: s, endLine: e };
     }
     const single = lineRange.match(/^\s*(\d+)\s*$/);
     if (single) {
       const n = parseInt(single[1], 10);
-      return [n, n];
+      if (n < 1) return undefined;
+      return { startLine: n, endLine: n };
     }
   }
   return undefined;
+}
+
+function optionalLineRange(body: any, toolName: string): ParsedLineRange {
+  if (body.line_range === undefined) return {};
+  const parsed = parseLineRange(body.line_range);
+  if (!parsed) throw new Error(`${toolName} line_range must be a string like "42", "10-20", "10-", or "-20"`);
+  return parsed;
+}
+
+function optionalLineAnchor(body: any, toolName: string): number | undefined {
+  const parsed = optionalLineRange(body, toolName);
+  if (parsed.startLine === undefined && parsed.endLine === undefined) return undefined;
+  if (parsed.startLine === undefined || parsed.endLine === undefined || parsed.endLine !== parsed.startLine) {
+    throw new Error(`${toolName} line_range must be a single line like "42"`);
+  }
+  return parsed.startLine;
+}
+
+function requiredClosedLineRange(body: any, toolName: string): { startLine: number; endLine: number } {
+  const parsed = optionalLineRange(body, toolName);
+  if (parsed.startLine === undefined || parsed.endLine === undefined) {
+    throw new Error(`${toolName} requires line_range as "start-end" or a single line like "42"`);
+  }
+  return { startLine: parsed.startLine, endLine: parsed.endLine };
 }
 
 export const TOOL_HANDLERS: Record<string, ToolHandler> = {
@@ -75,8 +99,7 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
   mass_duplicate: (tools, body) => tools.massDuplicate(body.duplications, body.instance_id),
   grep_scripts: (tools, body) => tools.grepScripts(body.pattern, {
     caseSensitive: body.caseSensitive,
-    // `isRegex` is an accepted alias for `usePattern` (Lua pattern matching).
-    usePattern: body.usePattern ?? body.isRegex,
+    usePattern: body.usePattern,
     contextLines: body.contextLines,
     maxResults: body.maxResults,
     maxResultsPerScript: body.maxResultsPerScript,
@@ -85,22 +108,16 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
     classFilter: body.classFilter,
   }, body.instance_id),
   get_script_source: (tools, body) => {
-    let startLine = body.startLine;
-    let endLine = body.endLine;
-    // Accept a convenience `lineRange` when explicit start/end aren't provided.
-    if (startLine === undefined && endLine === undefined && body.lineRange !== undefined) {
-      const parsed = parseLineRange(body.lineRange);
-      if (parsed) {
-        startLine = parsed[0];
-        endLine = parsed[1];
-      }
-    }
+    const { startLine, endLine } = optionalLineRange(body, 'get_script_source');
     return tools.getScriptSource(body.instancePath, startLine, endLine, body.instance_id);
   },
   set_script_source: (tools, body) => tools.setScriptSource(body.instancePath, body.source, body.instance_id),
-  edit_script_lines: (tools, body) => tools.editScriptLines(body.instancePath, body.old_string, body.new_string, body.startLine, body.instance_id),
+  edit_script_lines: (tools, body) => tools.editScriptLines(body.instancePath, body.old_string, body.new_string, optionalLineAnchor(body, 'edit_script_lines'), body.instance_id),
   insert_script_lines: (tools, body) => tools.insertScriptLines(body.instancePath, body.afterLine, body.newContent, body.instance_id),
-  delete_script_lines: (tools, body) => tools.deleteScriptLines(body.instancePath, body.startLine, body.endLine, body.instance_id),
+  delete_script_lines: (tools, body) => {
+    const { startLine, endLine } = requiredClosedLineRange(body, 'delete_script_lines');
+    return tools.deleteScriptLines(body.instancePath, startLine, endLine, body.instance_id);
+  },
   set_attribute: (tools, body) => tools.setAttribute(body.instancePath, body.attributeName, body.attributeValue, body.valueType, body.instance_id),
   get_attributes: (tools, body) => tools.getAttributes(body.instancePath, body.instance_id),
   delete_attribute: (tools, body) => tools.deleteAttribute(body.instancePath, body.attributeName, body.instance_id),
@@ -122,8 +139,8 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
   solo_playtest: (tools, body) => tools.soloPlaytest(body.action, body.mode, body.timeout, body.instance_id),
   start_playtest: (tools, body) => tools.startPlaytest(body.mode, body.numPlayers, body.instance_id),
   stop_playtest: (tools, body) => tools.stopPlaytest(body.instance_id),
-  multiplayer_playtest: (tools, body) => tools.multiplayerPlaytest(body.action, body.numPlayers, body.target, body.testArgs, body.value, body.timeout, body.instance_id),
-  multiplayer_test_start: (tools, body) => tools.multiplayerTestStart(body.numPlayers, body.testArgs, body.timeout, body.instance_id),
+  multiplayer_playtest: (tools, body) => tools.multiplayerPlaytest(body.action, body.numPlayers, body.target, body.testArgs, body.value, body.timeout, body.instance_id, body.force),
+  multiplayer_test_start: (tools, body) => tools.multiplayerTestStart(body.numPlayers, body.testArgs, body.timeout, body.instance_id, body.force),
   multiplayer_test_state: (tools, body) => tools.multiplayerTestState(body.instance_id),
   multiplayer_test_add_players: (tools, body) => tools.multiplayerTestAddPlayers(body.numPlayers, body.timeout, body.instance_id),
   multiplayer_test_leave_client: (tools, body) => tools.multiplayerTestLeaveClient(body.target, body.timeout, body.instance_id),

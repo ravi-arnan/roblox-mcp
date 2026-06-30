@@ -27,6 +27,8 @@ BreakpointHandlers.init(plugin);
 ServerUrlSettings.init(plugin);
 
 function applyRememberedServerUrl(): void {
+	if (ClientBroker.forkRole() === "client") return;
+
 	const rememberedServerUrl = ServerUrlSettings.readServerUrl();
 	if (rememberedServerUrl === undefined) return;
 

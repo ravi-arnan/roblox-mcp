@@ -566,19 +566,34 @@ function getProjectStructure(requestData: Record<string, unknown>) {
 
 // Split a Lua pattern on TOP-LEVEL "|" into alternatives. Lua patterns have no
 // alternation operator, so "foo|bar" would otherwise be matched as the literal
-// text "foo|bar" and silently never hit. "%|" stays a literal pipe.
+// text "foo|bar" and silently never hit. "%|" stays a literal pipe, and "%bxy"
+// keeps both balanced-match delimiter characters.
 function splitLuaAlternation(pattern: string): string[] {
 	const parts: string[] = [];
 	let current = "";
 	let i = 1;
 	const n = pattern.size();
+	let inCharClass = false;
 	while (i <= n) {
 		const c = string.sub(pattern, i, i);
 		if (c === "%") {
+			if (string.sub(pattern, i + 1, i + 1) === "b") {
+				current += string.sub(pattern, i, math.min(i + 3, n));
+				i += 4;
+				continue;
+			}
 			// Preserve an escape pair (e.g. %|, %., %d) intact.
 			current += string.sub(pattern, i, i + 1);
 			i += 2;
-		} else if (c === "|") {
+		} else if (c === "[") {
+			inCharClass = true;
+			current += c;
+			i += 1;
+		} else if (c === "]") {
+			inCharClass = false;
+			current += c;
+			i += 1;
+		} else if (c === "|" && !inCharClass) {
 			parts.push(current);
 			current = "";
 			i += 1;
@@ -610,11 +625,17 @@ function grepScripts(requestData: Record<string, unknown>) {
 	const pattern = requestData.pattern as string;
 	if (!pattern) return { error: "pattern is required" };
 
-	const caseSensitive = (requestData.caseSensitive as boolean) ?? false;
+	const usePattern = (requestData.usePattern as boolean) ?? false;
+	if (usePattern && requestData.caseSensitive === false) {
+		return {
+			error: "Case-insensitive Lua pattern search is not supported. Omit caseSensitive or pass caseSensitive: true with usePattern: true, or use literal search.",
+		};
+	}
+
+	const caseSensitive = usePattern ? true : ((requestData.caseSensitive as boolean) ?? false);
 	const contextLines = (requestData.contextLines as number) ?? 0;
 	const maxResults = (requestData.maxResults as number) ?? 100;
 	const maxResultsPerScript = (requestData.maxResultsPerScript as number) ?? 0;
-	const usePattern = (requestData.usePattern as boolean) ?? false;
 	const filesOnly = (requestData.filesOnly as boolean) ?? false;
 	const searchPath = (requestData.path as string) ?? "";
 	const classFilter = requestData.classFilter as string | undefined;

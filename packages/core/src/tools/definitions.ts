@@ -552,7 +552,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: 'get_script_source',
     category: 'read',
-    description: 'Get script source. Returns "source" and "numberedSource" (line-numbered). Pass a range for large scripts via startLine/endLine or the lineRange shorthand; without a range, large scripts are truncated (see the "truncated" flag and "note") to avoid flooding the context.',
+    description: 'Get script source. Returns "source" and "numberedSource" (line-numbered). Pass line_range for large scripts; without a range, large scripts are truncated (see the "truncated" flag and "note") to avoid flooding the context.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -560,17 +560,9 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
           type: 'string',
           description: 'Canonical path to a LuaSourceContainer'
         },
-        startLine: {
-          type: 'number',
-          description: 'Start line (1-indexed)'
-        },
-        endLine: {
-          type: 'number',
-          description: 'End line (inclusive)'
-        },
-        lineRange: {
+        line_range: {
           type: 'string',
-          description: 'Shorthand for startLine/endLine: "start-end" (e.g. "100-200"), open-ended ("100-" or "-200"), or a single line ("42"). Ignored when startLine/endLine are provided.'
+          description: 'Line range to return: "start-end" (e.g. "100-200"), open-ended ("100-" or "-200"), or a single line ("42").'
         },
         instance_id: {
           type: 'string',
@@ -606,7 +598,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: 'edit_script_lines',
     category: 'write',
-    description: 'Replace exact text in a script. Without startLine, old_string must match exactly once in the script. Pass startLine (1-indexed, from get_script_source) to anchor the edit to a specific line when old_string is ambiguous (e.g. repeated closing braces).',
+    description: 'Replace exact text in a script. Without line_range, old_string must match exactly once in the script. Pass line_range as a single line (e.g. "42") to anchor the edit when old_string is ambiguous.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -616,15 +608,15 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         },
         old_string: {
           type: 'string',
-          description: 'Exact text to find and replace. Must be unique in the script unless startLine is provided.'
+          description: 'Exact text to find and replace. Must be unique in the script unless line_range is provided.'
         },
         new_string: {
           type: 'string',
           description: 'Replacement text'
         },
-        startLine: {
-          type: 'number',
-          description: 'Optional 1-indexed line where old_string begins. When provided, skips uniqueness check and requires old_string to match starting at that exact line.'
+        line_range: {
+          type: 'string',
+          description: 'Optional single line where old_string begins, such as "42". When provided, skips uniqueness check and requires old_string to match starting at that exact line.'
         },
         instance_id: {
           type: 'string',
@@ -664,7 +656,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: 'delete_script_lines',
     category: 'write',
-    description: 'Delete a range of lines. 1-indexed, inclusive.',
+    description: 'Delete a range of lines. line_range is 1-indexed and inclusive.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -672,20 +664,16 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
           type: 'string',
           description: 'Canonical path to a LuaSourceContainer'
         },
-        startLine: {
-          type: 'number',
-          description: 'Start line (1-indexed)'
-        },
-        endLine: {
-          type: 'number',
-          description: 'End line (inclusive)'
+        line_range: {
+          type: 'string',
+          description: 'Line range to delete: "start-end" (e.g. "100-200") or a single line ("42"). Open-ended ranges are not accepted for deletion.'
         },
         instance_id: {
           type: 'string',
           description: 'Which connected Studio place to target. Required when multiple places are connected; omit when one. Use get_connected_instances to list available IDs.'
         }
       },
-      required: ['instancePath', 'startLine', 'endLine']
+      required: ['instancePath', 'line_range']
     }
   },
 
@@ -942,19 +930,15 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
       properties: {
         pattern: {
           type: 'string',
-          description: 'Search pattern. Literal by default; with usePattern/isRegex it is a Lua pattern with top-level "|" alternation (e.g. "foo|bar").'
+          description: 'Search text. Literal by default; with usePattern=true it is a case-sensitive Lua pattern with top-level "|" alternation (e.g. "foo|bar").'
         },
         caseSensitive: {
           type: 'boolean',
-          description: 'Case-sensitive search (default: false)'
+          description: 'Literal search case sensitivity (default: false). Lua pattern mode is always case-sensitive; passing false with usePattern=true is rejected.'
         },
         usePattern: {
           type: 'boolean',
-          description: 'Use Lua pattern matching instead of literal (default: false). Supports top-level alternation: "a|b" matches a line containing "a" or "b". Note: Lua patterns are NOT PCRE — use %d/%a/%w classes and ".-" (not ".*?"); ^ $ ( ) . % + - * ? [ ] are magic.'
-        },
-        isRegex: {
-          type: 'boolean',
-          description: 'Alias for usePattern. Enables Lua pattern matching with top-level "|" alternation.'
+          description: 'Use case-sensitive Lua pattern matching instead of literal search (default: false). Supports top-level alternation: "a|b" matches a line containing "a" or "b". Note: Lua patterns are NOT PCRE — use %d/%a/%w classes and ".-" (not ".*?"); ^ $ ( ) . % + - * ? [ ] are magic.'
         },
         contextLines: {
           type: 'number',
@@ -1356,7 +1340,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: 'multiplayer_playtest',
     category: 'write',
-    description: 'Start, inspect, add players to, remove a client from, or end a StudioTestService multiplayer playtest. Use action="start" with numPlayers, action="status", action="add_players" with numPlayers, action="leave_client" with target="client-N", or action="end". Returns brief lifecycle status only; read script output with get_runtime_logs.',
+    description: 'Start or inspect a StudioTestService multiplayer playtest. Use action="start" with numPlayers and force=true only when you accept that MCP cannot stop it and you must manually close the multiplayer test windows afterward. action="status" inspects state, action="add_players" adds players, and action="leave_client" removes one client. action="end" is disabled for now and returns the StudioTestService:EndTest broken-API reason. Returns brief lifecycle status only; read script output with get_runtime_logs.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1377,11 +1361,15 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
           description: 'For action="start": JSON-compatible table passed to StudioTestService:GetTestArgs() on server and clients.'
         },
         value: {
-          description: 'For action="end": JSON-compatible value returned to the edit-side ExecuteMultiplayerTestAsync call.'
+          description: 'Ignored while action="end" is disabled.'
+        },
+        force: {
+          type: 'boolean',
+          description: 'Required for action="start". Pass true only if you understand StudioTestService:EndTest is broken in this flow and you will manually close the multiplayer test windows.'
         },
         timeout: {
           type: 'number',
-          description: 'Max seconds to wait for action completion. Defaults to 30.'
+          description: 'Max seconds to wait for start peer detection or action completion. Defaults to 30.'
         },
         instance_id: {
           type: 'string',
@@ -2671,7 +2659,7 @@ export const DEPRECATED_TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: 'multiplayer_test_start',
     category: 'write',
-    description: 'Deprecated. Use multiplayer_playtest with action="start" instead. Starts a StudioTestService multiplayer test.',
+    description: 'Deprecated. Use multiplayer_playtest with action="start" instead. Starts a StudioTestService multiplayer test only when force=true acknowledges that MCP cannot stop it and the test windows must be closed manually.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -2682,6 +2670,10 @@ export const DEPRECATED_TOOL_DEFINITIONS: ToolDefinition[] = [
         testArgs: {
           description: 'JSON-compatible table passed to StudioTestService:GetTestArgs() on server and clients.'
         },
+        force: {
+          type: 'boolean',
+          description: 'Required. Pass true only if you understand StudioTestService:EndTest is broken in this flow and you will manually close the multiplayer test windows.'
+        },
         timeout: {
           type: 'number',
           description: 'Max seconds to wait for server + clients to register (default 30).'
@@ -2691,7 +2683,7 @@ export const DEPRECATED_TOOL_DEFINITIONS: ToolDefinition[] = [
           description: 'Which connected Studio place to target. Required when multiple places are connected; omit when one. Use get_connected_instances to list available IDs.'
         }
       },
-      required: ['numPlayers']
+      required: ['numPlayers', 'force']
     }
   },
   {
@@ -2756,16 +2748,16 @@ export const DEPRECATED_TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: 'multiplayer_test_end',
     category: 'write',
-    description: 'Deprecated. Use multiplayer_playtest with action="end" instead. Ends a running StudioTestService multiplayer test.',
+    description: 'Deprecated. Multiplayer StudioTestService stop/end is disabled for now because StudioTestService:EndTest is broken in this flow. This tool returns a disabled error and does not call EndTest.',
     inputSchema: {
       type: 'object',
       properties: {
         value: {
-          description: 'JSON-compatible value returned to the edit-side ExecuteMultiplayerTestAsync call.'
+          description: 'Ignored while multiplayer stop/end is disabled.'
         },
         timeout: {
           type: 'number',
-          description: 'Max seconds to wait for runtime peers to disconnect (default 30).'
+          description: 'Ignored while multiplayer stop/end is disabled.'
         },
         instance_id: {
           type: 'string',

@@ -62,6 +62,23 @@ const MAX_INLINE_IMAGE_BYTES = 6_000_000;
 const MAX_DEVICE_MATRIX_ENTRIES = 6;
 const MAX_NETWORK_PACKET_LOSS_PERCENT = 0.5;
 const STUDIO_ASSISTANT_SOURCE_IMAGE_LABEL = 'Studio Assistant Source Image';
+const MULTIPLAYER_FORCE_REQUIRED_MESSAGE =
+  'StudioTestService multiplayer stop is currently disabled because StudioTestService:EndTest is broken for this flow. ' +
+  'Pass force=true only if you understand you must manually close the multiplayer test windows afterward.';
+const MULTIPLAYER_STOP_DISABLED_MESSAGE =
+  'Multiplayer playtest stop/end is disabled because StudioTestService:EndTest is currently broken for this flow. ' +
+  'Manually close the Studio multiplayer test windows instead.';
+
+function multiplayerStopDisabledBody(): Record<string, unknown> {
+  return {
+    success: false,
+    error: 'multiplayer_stop_disabled',
+    message: MULTIPLAYER_STOP_DISABLED_MESSAGE,
+    reason: 'StudioTestService:EndTest does not reliably end StudioTestService multiplayer sessions from MCP right now.',
+    manualCleanupRequired: true,
+    recoveryHint: 'Close the Roblox Studio multiplayer test windows manually.',
+  };
+}
 
 // Encodes the raw RGBA capture into the requested image format.
 // - 'png': lossless — sharpest text/UI, but a busy 3D scene can be large.
@@ -1572,13 +1589,16 @@ export class RobloxStudioTools {
         : pathSegments[0] === 'game' ? (pathSegments[1] ?? 'game') : pathSegments[0];
     const typeNote = scriptTypeInfo[response.className as string] || (response.className as string);
     const serviceNote = serviceInfo[topService] || topService;
+    const showRange = Boolean(response.isPartial || response.truncated)
+      && response.startLine !== undefined
+      && response.endLine !== undefined;
 
     const headerLines: string[] = [
       `Path:     ${pathStr}`,
       `Type:     ${typeNote}`,
       `Location: ${serviceNote}`,
       `Lines:    ${response.lineCount} total${
-        response.isPartial ? ` (showing ${response.startLine}-${response.endLine})` : ''
+        showRange ? ` (showing ${response.startLine}-${response.endLine})` : ''
       }`,
     ];
 
@@ -1586,8 +1606,10 @@ export class RobloxStudioTools {
       headerLines.push(`Status:   DISABLED`);
     }
 
-    if (response.truncated) {
-      headerLines.push(`Note:     Truncated to first 1000 lines, use startLine/endLine to read more`);
+    if (typeof response.note === 'string' && response.note.length > 0) {
+      headerLines.push(`Note:     ${response.note}`);
+    } else if (response.truncated) {
+      headerLines.push(`Note:     Truncated response; use line_range to read more`);
     }
 
     const header = headerLines.join('\n');
@@ -1670,7 +1692,6 @@ export class RobloxStudioTools {
     options?: {
       caseSensitive?: boolean;
       usePattern?: boolean;
-      isRegex?: boolean;
       contextLines?: number;
       maxResults?: number;
       maxResultsPerScript?: number;
@@ -1683,12 +1704,9 @@ export class RobloxStudioTools {
     if (!pattern) {
       throw new Error('Pattern is required for grep_scripts');
     }
-    // `isRegex` is an accepted alias for `usePattern`.
-    const { isRegex, ...rest } = options ?? {};
     const response = await this._callSingle('/api/grep-scripts', {
       pattern,
-      ...rest,
-      usePattern: rest.usePattern ?? isRegex,
+      ...(options ?? {}),
     }, undefined, instance_id);
     return {
       content: [
@@ -3210,17 +3228,32 @@ export class RobloxStudioTools {
     instanceId: string,
     clientCount: number,
     timeoutSec = 30,
+    connectedAfter?: number,
   ): Promise<{ ok: boolean; roles: string[]; timedOut: boolean; phase?: string; error?: unknown }> {
     const deadline = Date.now() + timeoutSec * 1000;
+    let lastPhase: string | undefined;
     while (Date.now() < deadline) {
       const exact = await this._waitForExactClientCount(instanceId, clientCount, 0.25, 0);
       if (exact.ok || exact.extraClients) {
+        if (exact.ok && connectedAfter !== undefined) {
+          const instances = this.bridge.getInstances().filter((inst) => inst.instanceId === instanceId);
+          const freshRoles = new Set(instances.filter((inst) => inst.connectedAt >= connectedAfter).map((inst) => inst.role));
+          const freshClientCount = [...freshRoles].filter((role) => /^client-\d+$/.test(role)).length;
+          if (!freshRoles.has('server') || freshClientCount !== clientCount) {
+            await sleep(250);
+            continue;
+          }
+        }
         return { ok: exact.ok, roles: exact.roles, timedOut: false, error: exact.extraClients ? `Expected ${clientCount} client(s), but Studio registered ${exact.clientCount}.` : undefined };
       }
       try {
-        const editState = await this.client.request('/api/multiplayer-test-state', {}, instanceId, 'edit');
+        const remainingMs = Math.max(1, Math.min(1000, deadline - Date.now()));
+        const editState = await this.client.request('/api/multiplayer-test-state', {}, instanceId, 'edit', remainingMs);
         const session = editState?.session;
-        if (session?.phase === 'failed' || session?.phase === 'completed') {
+        if (typeof session?.phase === 'string') {
+          lastPhase = session.phase;
+        }
+        if (session?.phase === 'failed') {
           return { ok: false, roles: this._rolesForInstance(instanceId), timedOut: false, phase: session.phase, error: session.error };
         }
       } catch {
@@ -3228,7 +3261,7 @@ export class RobloxStudioTools {
       }
       await sleep(250);
     }
-    return { ok: false, roles: this._rolesForInstance(instanceId), timedOut: true };
+    return { ok: false, roles: this._rolesForInstance(instanceId), timedOut: true, phase: lastPhase };
   }
 
   async multiplayerPlaytest(
@@ -3239,6 +3272,7 @@ export class RobloxStudioTools {
     value?: unknown,
     timeout?: number,
     instance_id?: string,
+    force?: boolean,
   ) {
     if (
       action !== 'start' &&
@@ -3270,29 +3304,37 @@ export class RobloxStudioTools {
     }
 
     if (action === 'start') {
-      const body = this._parseTextResult(await this.multiplayerTestStart(numPlayers as number, testArgs, timeout, instance_id));
+      if (force !== true) {
+        return this._textResult({
+          success: false,
+          action,
+          error: 'multiplayer_force_required',
+          message: MULTIPLAYER_FORCE_REQUIRED_MESSAGE,
+          requiresForce: true,
+          manualCleanupRequired: true,
+        });
+      }
+
+      const body = this._parseTextResult(await this.multiplayerTestStart(numPlayers as number, testArgs, timeout, instance_id, force));
       const state = body.state && typeof body.state === 'object' ? body.state as Record<string, any> : {};
-      // The session is a success once it has launched, even if not every peer has
-      // registered yet (readiness). A false "timeout" while the test is actually
-      // running was a long-standing source of confusion.
-      const launched = body.success === true && (body.ready === true || body.launched === true);
+      const launched = body.success === true && body.ready === true;
       return this._textResult(launched ? {
         success: true,
         action,
-        message: body.ready === true
-          ? 'Multiplayer playtest started.'
-          : 'Multiplayer playtest launched; peers still registering. Use multiplayer_playtest action="status" to confirm readiness.',
-        ready: body.ready === true,
+        message: 'Multiplayer playtest started. Stop/end is disabled; close the multiplayer test windows manually when finished.',
+        ready: true,
+        manualCleanupRequired: true,
         roles: Array.isArray(body.roles) ? body.roles : undefined,
         clientRoles: Array.isArray(state.clientRoles) ? state.clientRoles : undefined,
         playerCount: typeof state.playerCount === 'number' ? state.playerCount : undefined,
       } : {
         success: false,
         action,
-        error: body.error ?? body.wait?.error ?? 'start_failed',
+        error: body.error ?? body.wait?.error ?? 'multiplayer_start_not_detected',
         message: body.success === true
-          ? 'Multiplayer playtest did not become ready before timeout.'
+          ? 'Multiplayer playtest start was requested, but MCP did not detect the required server/client peers before timeout. You may need to close the test windows manually.'
           : body.message ?? 'Multiplayer playtest did not start.',
+        manualCleanupRequired: body.startRequested === true || body.launched === true ? true : undefined,
         roles: Array.isArray(body.roles) ? body.roles : undefined,
       });
     }
@@ -3335,31 +3377,43 @@ export class RobloxStudioTools {
       });
     }
 
-    const body = this._parseTextResult(await this.multiplayerTestEnd(value, timeout, instance_id));
-    return this._textResult(body.success === true && body.ended === true ? {
-      success: true,
+    return this._textResult({
       action,
-      message: body.alreadyEnded === true
-        ? 'Multiplayer playtest already ended.'
-        : (body.teardownConfirmed === false
-          ? 'Multiplayer playtest end requested; teardown still in progress. Use multiplayer_playtest action="status" to confirm.'
-          : 'Multiplayer playtest ended.'),
-      teardownConfirmed: body.teardownConfirmed === true,
-    } : {
-      success: false,
-      action,
-      error: body.error ?? 'end_failed',
-      message: body.message ?? 'Multiplayer playtest did not end.',
-      roles: Array.isArray(body.roles) ? body.roles : undefined,
-      editDone: body.editDone === false ? false : undefined,
+      ...multiplayerStopDisabledBody(),
     });
   }
 
-  async multiplayerTestStart(numPlayers: number, testArgs?: unknown, timeout?: number, instance_id?: string) {
+  async multiplayerTestStart(numPlayers: number, testArgs?: unknown, timeout?: number, instance_id?: string, force?: boolean) {
     if (!Number.isInteger(numPlayers) || numPlayers < 1 || numPlayers > 8) {
       throw new Error('numPlayers must be an integer from 1 to 8');
     }
     const editTarget = this._resolveSingleTarget('edit', instance_id);
+    if (force !== true) {
+      return this._textResult({
+        success: false,
+        error: 'multiplayer_force_required',
+        message: MULTIPLAYER_FORCE_REQUIRED_MESSAGE,
+        requiresForce: true,
+        manualCleanupRequired: true,
+      });
+    }
+
+    const existingRuntime = this._runtimeTargetsForEquivalentInstances(editTarget.instanceId);
+    if (existingRuntime.length > 0) {
+      const roles = this._rolesForEquivalentInstances(editTarget.instanceId);
+      return this._textResult({
+        success: false,
+        error: 'Multiplayer playtest already running.',
+        message: 'A Studio runtime is already connected for this place. Close the existing playtest windows manually before starting another multiplayer playtest.',
+        ready: true,
+        timedOut: false,
+        roles,
+        runtimeRoles: existingRuntime.map((target) => target.role),
+        manualCleanupRequired: true,
+      });
+    }
+
+    const startedAt = Date.now();
     const response = await this.client.request(
       '/api/multiplayer-test-start',
       { numPlayers, testArgs: testArgs ?? {} },
@@ -3370,23 +3424,29 @@ export class RobloxStudioTools {
       return { content: [{ type: 'text', text: JSON.stringify(response) }] };
     }
 
-    const wait = await this._waitForMultiplayerStart(editTarget.instanceId, numPlayers, timeout ?? 60);
-    // A heavy place can take longer than the readiness window to register every
-    // peer; readiness timing out does NOT mean the test failed to launch. Treat
-    // an actually-running session as launched so callers don't see a false failure.
-    const launched = wait.ok || await this._isMultiplayerTestRunning(editTarget.instanceId);
+    const wait = await this._waitForMultiplayerStart(editTarget.instanceId, numPlayers, timeout ?? 60, startedAt);
+    const launched = wait.ok;
     const state = await this._buildMultiplayerState(editTarget.instanceId);
+    const success = response.success === true && wait.ok;
     return {
       content: [{
         type: 'text',
         text: JSON.stringify({
           ...response,
+          success,
           ready: wait.ok,
           launched,
+          startRequested: response.success === true,
           timedOut: wait.timedOut,
           wait,
           roles: wait.roles,
           state,
+          error: success ? undefined : wait.error ?? 'multiplayer_start_not_detected',
+          message: success
+            ? 'Multiplayer Studio test started and runtime peers detected.'
+            : 'Multiplayer Studio test start was requested, but MCP did not detect the required server/client peers before timeout. Close the multiplayer test windows manually if Studio launched them.',
+          manualCleanupRequired: success || response.success === true ? true : undefined,
+          startedAt,
         }),
       }],
     };
@@ -3465,67 +3525,10 @@ export class RobloxStudioTools {
   }
 
   async multiplayerTestEnd(value?: unknown, timeout?: number, instance_id?: string) {
-    let serverTarget: { instanceId: string; role: string };
-    try {
-      serverTarget = this._resolveSingleTarget('server', instance_id);
-    } catch (err) {
-      // No running server peer to receive EndTest. If no runtime peers remain at
-      // all, the multiplayer test is already torn down — report it ended rather
-      // than failing on target resolution.
-      const instanceId = this._resolveInstanceIdOnly(instance_id);
-      const hasRuntime = this._rolesForInstance(instanceId).some(
-        (role) => role === 'server' || /^client-\d+$/.test(role),
-      );
-      if (!hasRuntime) {
-        return {
-          content: [{
-            type: 'text',
-            text: JSON.stringify({
-              success: true,
-              ended: true,
-              alreadyEnded: true,
-              teardownConfirmed: true,
-              message: 'No active multiplayer test to end (already ended).',
-            }),
-          }],
-        };
-      }
-      throw err;
-    }
-    const response = await this.client.request(
-      '/api/multiplayer-test-end',
-      { value: value ?? 'ended_by_mcp' },
-      serverTarget.instanceId,
-      serverTarget.role,
-    );
-    if (response?.error) {
-      return { content: [{ type: 'text', text: JSON.stringify(response) }] };
-    }
-    const editDone = await this._waitForMultiplayerEditDone(serverTarget.instanceId, timeout ?? 30);
-    const wait = await this._waitForRuntimeRoles(
-      serverTarget.instanceId,
-      { noRuntime: true },
-      timeout ?? 30,
-    );
-    const state = await this._buildMultiplayerState(serverTarget.instanceId);
-    return {
-      content: [{
-        type: 'text',
-        text: JSON.stringify({
-          ...response,
-          // EndTest was accepted by the server peer => the test is ending. Full
-          // teardown (all runtime peers gone) is reported separately via
-          // teardownConfirmed and does NOT gate success, since teardown can
-          // outlast the wait window.
-          ended: response.success === true,
-          teardownConfirmed: wait.ok,
-          editDone,
-          timedOut: wait.timedOut,
-          roles: wait.roles,
-          state,
-        }),
-      }],
-    };
+    void value;
+    void timeout;
+    void instance_id;
+    return this._textResult(multiplayerStopDisabledBody());
   }
 
   async getConnectedInstances() {
