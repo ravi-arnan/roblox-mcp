@@ -84,8 +84,9 @@ export class McpClient {
         try {
           const msg = JSON.parse(line);
           if (msg.id != null && this.pending.has(msg.id)) {
-            const { resolve: r, reject } = this.pending.get(msg.id);
+            const { resolve: r, reject, timeoutId } = this.pending.get(msg.id);
             this.pending.delete(msg.id);
+            clearTimeout(timeoutId);
             if (msg.error) reject(new Error(JSON.stringify(msg.error)));
             else r(msg.result);
           }
@@ -100,7 +101,14 @@ export class McpClient {
       for (const line of lines) this.stderrLines.push(line);
     });
 
-    this.proc.on('exit', (code) => { this.exitCode = code; });
+    this.proc.on('exit', (code) => {
+      this.exitCode = code;
+      for (const [id, pending] of this.pending.entries()) {
+        clearTimeout(pending.timeoutId);
+        pending.reject(new Error(`McpClient ${this.label}: subprocess exited before RPC ${id} completed`));
+      }
+      this.pending.clear();
+    });
 
     // Wait for the subprocess to print its "running on stdio" banner so we
     // know stdio MCP is ready. Bound at 5s — fresh launches usually settle
@@ -125,13 +133,13 @@ export class McpClient {
   async rpc(method, params, timeoutMs = 30_000) {
     const id = this.nextId++;
     const p = new Promise((res, rej) => {
-      this.pending.set(id, { resolve: res, reject: rej });
-      setTimeout(() => {
+      const timeoutId = setTimeout(() => {
         if (this.pending.has(id)) {
           this.pending.delete(id);
           rej(new Error(`RPC ${method} timed out after ${timeoutMs}ms`));
         }
       }, timeoutMs);
+      this.pending.set(id, { resolve: res, reject: rej, timeoutId });
     });
     this.proc.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
     return p;
@@ -174,6 +182,11 @@ export class McpClient {
 
   async stop() {
     if (this.proc && !this.proc.killed) {
+      for (const [id, pending] of this.pending.entries()) {
+        clearTimeout(pending.timeoutId);
+        pending.reject(new Error(`McpClient ${this.label}: stopped before RPC ${id} completed`));
+      }
+      this.pending.clear();
       this.proc.kill('SIGTERM');
       await delay(200);
       if (!this.proc.killed) this.proc.kill('SIGKILL');

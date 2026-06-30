@@ -2808,31 +2808,41 @@ export class RobloxStudioTools {
     if (action === 'close') {
       let record: ManagedStudioInstance | undefined;
       if (instance_id) {
-        record = this.instanceManager.get(instance_id);
-        if (!record) {
-          const connected = this.bridge.getPublicInstances().filter((instance) => instance.instanceId === instance_id);
-          const edit = connected.find((instance) => instance.role === 'edit');
-          if (!edit) {
-            return this._textResult({
-              error: 'Instance is not connected or managed.',
-              instance_id,
-            });
-          }
-          try {
-            this.instanceManager.closeConnectedInstance(edit);
-            await sleep(500);
-          } catch (error) {
-            return this._textResult({
-              error: error instanceof Error ? error.message : String(error),
-              instance_id,
-            });
-          }
+        const managedClose = this.instanceManager.closeByInstanceId(instance_id);
+        if (managedClose.status !== 'not_found') {
+          this.bridge.unregisterInstanceId(instance_id);
+          await sleep(500);
           this.bridge.unregisterInstanceId(instance_id);
           return this._textResult({
             instance_id,
-            message: 'Studio instance closed.',
+            message: managedClose.status === 'already_closed'
+              ? 'Studio instance was already closed.'
+              : 'Studio instance closed.',
           });
         }
+
+        const connected = this.bridge.getPublicInstances().filter((instance) => instance.instanceId === instance_id);
+        const edit = connected.find((instance) => instance.role === 'edit');
+        if (!edit) {
+          return this._textResult({
+            error: 'Instance is not connected or managed.',
+            instance_id,
+          });
+        }
+        try {
+          this.instanceManager.closeConnectedInstance(edit);
+          await sleep(500);
+        } catch (error) {
+          return this._textResult({
+            error: error instanceof Error ? error.message : String(error),
+            instance_id,
+          });
+        }
+        this.bridge.unregisterInstanceId(instance_id);
+        return this._textResult({
+          instance_id,
+          message: 'Studio instance closed.',
+        });
       } else {
         const active = this.instanceManager.list().filter((entry) => entry.closedAt === undefined);
         if (active.length === 0) {
@@ -2848,14 +2858,16 @@ export class RobloxStudioTools {
       }
 
       if (record.instanceId) this.bridge.unregisterInstanceId(record.instanceId);
-      this.instanceManager.close(record);
+      const closeResult = this.instanceManager.close(record);
       if (record.instanceId) {
         await sleep(500);
         this.bridge.unregisterInstanceId(record.instanceId);
       }
       return this._textResult({
         instance_id: record.instanceId,
-        message: 'Studio instance closed.',
+        message: closeResult.status === 'already_closed'
+          ? 'Studio instance was already closed.'
+          : 'Studio instance closed.',
       });
     }
 

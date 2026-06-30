@@ -1,7 +1,9 @@
 import { execFileSync, spawn } from 'child_process';
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync } from 'fs';
+import { randomUUID } from 'crypto';
 import * as os from 'os';
 import * as path from 'path';
+import { ManagedInstanceRegistry, type ManagedInstanceRegistryRecord, type RegistrySweepOptions } from './managed-instance-registry.js';
 
 export type StudioLaunchSource = 'baseplate' | 'local_file' | 'published_place' | 'place_revision';
 
@@ -14,6 +16,7 @@ export interface StudioLaunchOptions {
 }
 
 export interface ManagedStudioInstance {
+  recordId?: string;
   source: StudioLaunchSource;
   instanceId?: string;
   nativeProcessId?: number;
@@ -26,12 +29,17 @@ export interface ManagedStudioInstance {
   localPlaceFile?: string;
   launchedAt: number;
   closedAt?: number;
+  ownerPid?: number;
+  bootId?: string;
+  deleteLocalPlaceFileOnClose?: boolean;
 }
 
 export interface StudioProcessInfo {
   Id: number;
+  Name?: string;
   Path?: string;
   MainWindowTitle?: string;
+  CommandLine?: string;
 }
 
 const BASEPLATE_TEMP_DIR = path.join(os.tmpdir(), 'robloxstudio-mcp-baseplates');
@@ -45,6 +53,30 @@ export interface ConnectedStudioInstance {
   placeName: string;
   dataModelName: string;
 }
+
+type StudioChildProcess = {
+  pid?: number;
+  unref: () => void;
+};
+
+export interface StudioProcessAdapter {
+  listStudioProcesses?: () => StudioProcessInfo[];
+  stopProcess?: (processId: number) => void;
+  resolveStudioExe?: () => string;
+  spawnStudio?: (exe: string, args: string[], options: Parameters<typeof spawn>[2]) => StudioChildProcess;
+  currentBootId?: () => string;
+}
+
+export interface StudioInstanceManagerOptions {
+  registryDir?: string;
+  registry?: ManagedInstanceRegistry;
+  processAdapter?: StudioProcessAdapter;
+}
+
+export type ManagedStudioCloseResult =
+  | { status: 'closed'; instanceId?: string }
+  | { status: 'already_closed'; instanceId?: string }
+  | { status: 'not_found'; instanceId?: string };
 
 function run(command: string, args: string[], options: Record<string, unknown> = {}): string {
   return execFileSync(command, args, {
@@ -193,7 +225,7 @@ export function listStudioProcesses(): StudioProcessInfo[] {
       .filter(Boolean)
       .map((line) => {
         const [pid, ...rest] = line.trim().split(/\s+/);
-        return { Id: Number(pid), Path: rest.join(' '), MainWindowTitle: '' };
+        return { Id: Number(pid), Name: 'RobloxStudio', Path: rest.join(' '), MainWindowTitle: '' };
       })
       .filter((proc) => Number.isFinite(proc.Id));
   }
@@ -204,7 +236,7 @@ export function listStudioProcesses(): StudioProcessInfo[] {
   try {
     out = powershell(
       'Get-Process RobloxStudioBeta -ErrorAction SilentlyContinue | ' +
-      'Select-Object Id,Path,MainWindowTitle | ConvertTo-Json -Compress',
+      'Select-Object Id,Name,Path,MainWindowTitle | ConvertTo-Json -Compress',
     );
   } catch {
     return [];
@@ -212,6 +244,34 @@ export function listStudioProcesses(): StudioProcessInfo[] {
   if (!out) return [];
   const parsed = JSON.parse(out);
   return Array.isArray(parsed) ? parsed : [parsed];
+}
+
+export function currentBootId(): string {
+  if (process.platform === 'linux') {
+    try {
+      return readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim();
+    } catch {
+      // Fall through to a stable best-effort value.
+    }
+  }
+
+  if (process.platform === 'win32' || isWsl()) {
+    try {
+      return powershell('(Get-CimInstance Win32_OperatingSystem).LastBootUpTime.ToUniversalTime().ToString("o")');
+    } catch {
+      // Fall through to a stable best-effort value.
+    }
+  }
+
+  if (process.platform === 'darwin') {
+    try {
+      return run('sysctl', ['-n', 'kern.boottime']);
+    } catch {
+      // Fall through to a stable best-effort value.
+    }
+  }
+
+  return `${process.platform}:${os.hostname()}:unknown-boot`;
 }
 
 export function buildStudioLaunchArgs(options: StudioLaunchOptions): string[] {
@@ -242,38 +302,72 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function basenameAny(filePath: string): string {
+  return path.basename(filePath.replace(/\\/g, '/'));
+}
+
 export class StudioInstanceManager {
   private managedByInstanceId = new Map<string, ManagedStudioInstance>();
   private pending = new Set<ManagedStudioInstance>();
+  private readonly registry: ManagedInstanceRegistry;
+  private readonly processAdapter: StudioProcessAdapter;
+
+  constructor(options: StudioInstanceManagerOptions = {}) {
+    this.registry = options.registry ?? new ManagedInstanceRegistry(options.registryDir);
+    this.processAdapter = options.processAdapter ?? {};
+  }
 
   list(): ManagedStudioInstance[] {
-    return [...this.managedByInstanceId.values(), ...this.pending]
-      .filter((instance, index, all) => all.indexOf(instance) === index);
+    this.sweepRegistry();
+    const records = [...this.managedByInstanceId.values(), ...this.pending];
+    for (const registryRecord of this.registry.listOpen(this.registrySweepOptions())) {
+      const record = this.fromRegistryRecord(registryRecord);
+      if (records.some((existing) =>
+        (record.recordId && existing.recordId === record.recordId) ||
+        (record.instanceId && existing.instanceId === record.instanceId)
+      )) {
+        continue;
+      }
+      records.push(record);
+    }
+    return records.filter((instance, index, all) => all.indexOf(instance) === index);
   }
 
   get(instanceId: string): ManagedStudioInstance | undefined {
-    return this.managedByInstanceId.get(instanceId);
+    this.sweepRegistry();
+    const memoryRecord = this.managedByInstanceId.get(instanceId);
+    if (memoryRecord) return memoryRecord;
+    const registryRecord = this.registry.findOpenByInstanceId(instanceId, this.registrySweepOptions());
+    return registryRecord ? this.fromRegistryRecord(registryRecord) : undefined;
   }
 
   attachInstanceId(record: ManagedStudioInstance, instanceId: string) {
     record.instanceId = instanceId;
     this.pending.delete(record);
     this.managedByInstanceId.set(instanceId, record);
+    if (record.recordId) {
+      this.registry.attachInstanceId(record.recordId, instanceId);
+    }
   }
 
   async launch(options: StudioLaunchOptions): Promise<ManagedStudioInstance> {
+    this.sweepRegistry();
     const preparedOptions = prepareStudioLaunchOptions(options);
-    const before = new Set(listStudioProcesses().map((proc) => proc.Id));
-    const exe = resolveStudioExe();
+    const before = new Set(this.listStudioProcesses().map((proc) => proc.Id));
+    const exe = this.processAdapter.resolveStudioExe?.() ?? resolveStudioExe();
     const args = buildStudioLaunchArgs(preparedOptions).map(toStudioLaunchArg);
-    const proc = spawn(exe, args, {
+    const spawnOptions: Parameters<typeof spawn>[2] = {
       cwd: isWsl() && existsSync('/mnt/c/Windows') ? '/mnt/c/Windows' : process.cwd(),
       detached: true,
       stdio: 'ignore',
-    });
+    };
+    const proc = this.processAdapter.spawnStudio
+      ? this.processAdapter.spawnStudio(exe, args, spawnOptions)
+      : spawn(exe, args, spawnOptions);
     proc.unref();
 
     const record: ManagedStudioInstance = {
+      recordId: randomUUID(),
       source: options.source,
       spawnPid: proc.pid,
       exe,
@@ -283,14 +377,19 @@ export class StudioInstanceManager {
       placeVersion: preparedOptions.placeVersion,
       localPlaceFile: preparedOptions.localPlaceFile,
       launchedAt: Date.now(),
+      ownerPid: process.pid,
+      bootId: this.getCurrentBootId(),
+      deleteLocalPlaceFileOnClose: options.source === 'baseplate',
     };
     this.pending.add(record);
+    this.registry.upsert(this.toRegistryRecord(record));
 
     const deadline = Date.now() + 5000;
     while (Date.now() < deadline && record.nativeProcessId === undefined) {
-      const created = listStudioProcesses().find((candidate) => !before.has(candidate.Id));
+      const created = this.listStudioProcesses().find((candidate) => !before.has(candidate.Id));
       if (created) {
         record.nativeProcessId = created.Id;
+        this.registry.upsert(this.toRegistryRecord(record));
         break;
       }
       await delay(250);
@@ -298,31 +397,109 @@ export class StudioInstanceManager {
 
     if (record.nativeProcessId === undefined && process.platform !== 'win32' && !isWsl()) {
       record.nativeProcessId = proc.pid;
+      this.registry.upsert(this.toRegistryRecord(record));
     }
 
     return record;
   }
 
-  close(record: ManagedStudioInstance) {
+  closeByInstanceId(instanceId: string): ManagedStudioCloseResult {
+    const memoryRecord = this.managedByInstanceId.get(instanceId);
+    if (memoryRecord) return this.close(memoryRecord);
+
+    const registryRecord = this.registry.findAnyByInstanceId(instanceId);
+    if (!registryRecord) {
+      this.sweepRegistry();
+      return { status: 'not_found', instanceId };
+    }
+
+    if (registryRecord.closedAt !== undefined) {
+      this.cleanupManagedRecord(registryRecord);
+      this.registry.delete(registryRecord.recordId);
+      this.registry.logEvent({
+        event: 'registry_close_already_stopped',
+        recordId: registryRecord.recordId,
+        instanceId: registryRecord.instanceId,
+        source: registryRecord.source,
+        reason: 'closed_at_present',
+        action: 'deleted_record_and_cleaned_baseplate',
+      });
+      return { status: 'already_closed', instanceId };
+    }
+
+    if (registryRecord.bootId !== this.getCurrentBootId()) {
+      this.cleanupManagedRecord(registryRecord);
+      this.registry.delete(registryRecord.recordId);
+      this.registry.logEvent({
+        event: 'registry_pruned_previous_boot',
+        recordId: registryRecord.recordId,
+        instanceId: registryRecord.instanceId,
+        source: registryRecord.source,
+        reason: 'boot_id_changed',
+        action: 'deleted_record_and_cleaned_baseplate',
+      });
+      return { status: 'already_closed', instanceId };
+    }
+
+    return this.close(this.fromRegistryRecord(registryRecord));
+  }
+
+  close(record: ManagedStudioInstance): ManagedStudioCloseResult {
     const processId = record.nativeProcessId ?? record.spawnPid;
     if (!processId) {
       throw new Error(`Cannot close ${record.instanceId ?? 'Studio launch'} because its process id was not detected.`);
     }
 
-    if (process.platform === 'win32' || isWsl()) {
-      powershell(`Stop-Process -Id ${Math.trunc(processId)} -Force -ErrorAction Stop`);
-    } else {
-      try {
-        process.kill(processId, 'SIGTERM');
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
-      }
+    const studioProcess = this.findProcessById(processId);
+    if (!studioProcess) {
+      this.cleanupManagedRecord(record);
+      this.markClosedInMemory(record);
+      this.markClosedInRegistry(record);
+      this.registry.logEvent({
+        event: 'registry_close_already_stopped',
+        recordId: record.recordId,
+        instanceId: record.instanceId,
+        source: record.source,
+        reason: 'pid_not_running',
+        action: 'marked_closed_and_cleaned_baseplate',
+      });
+      return { status: 'already_closed', instanceId: record.instanceId };
+    }
+
+    if (!this.verifyProcessForRecord(record, studioProcess)) {
+      this.registry.logEvent({
+        event: 'registry_process_verification_failed',
+        recordId: record.recordId,
+        instanceId: record.instanceId,
+        source: record.source,
+        reason: 'identity_mismatch',
+      });
+      throw new Error('Managed Studio process identity could not be verified.');
+    }
+
+    try {
+      this.closeProcess(processId);
+    } catch (error) {
+      if (this.findProcessById(processId)) throw error;
+      this.registry.logEvent({
+        event: 'registry_close_already_stopped',
+        recordId: record.recordId,
+        instanceId: record.instanceId,
+        source: record.source,
+        reason: 'stop_raced_with_exit',
+        action: 'marked_closed_and_cleaned_baseplate',
+      });
+      this.cleanupManagedRecord(record);
+      this.markClosedInMemory(record);
+      this.markClosedInRegistry(record);
+      return { status: 'already_closed', instanceId: record.instanceId };
     }
 
     record.closedAt = Date.now();
-    if (record.instanceId) this.managedByInstanceId.delete(record.instanceId);
-    this.pending.delete(record);
-    cleanupManagedBaseplateFiles(record);
+    this.cleanupManagedRecord(record);
+    this.markClosedInMemory(record);
+    this.markClosedInRegistry(record);
+    return { status: 'closed', instanceId: record.instanceId };
   }
 
   closeConnectedInstance(instance: ConnectedStudioInstance) {
@@ -334,6 +511,11 @@ export class StudioInstanceManager {
   }
 
   private closeProcess(processId: number) {
+    if (this.processAdapter.stopProcess) {
+      this.processAdapter.stopProcess(processId);
+      return;
+    }
+
     if (process.platform === 'win32' || isWsl()) {
       powershell(`Stop-Process -Id ${Math.trunc(processId)} -Force -ErrorAction Stop`);
     } else {
@@ -346,7 +528,7 @@ export class StudioInstanceManager {
   }
 
   private findProcessForConnectedInstance(instance: ConnectedStudioInstance): StudioProcessInfo | undefined {
-    const processes = listStudioProcesses();
+    const processes = this.listStudioProcesses();
     if (processes.length === 0) return undefined;
     if (processes.length === 1) return processes[0];
 
@@ -369,5 +551,117 @@ export class StudioInstanceManager {
       throw new Error(`Multiple Studio processes matched connected instance "${instance.instanceId}".`);
     }
     return undefined;
+  }
+
+  private listStudioProcesses(): StudioProcessInfo[] {
+    return this.processAdapter.listStudioProcesses?.() ?? listStudioProcesses();
+  }
+
+  private getCurrentBootId(): string {
+    return this.processAdapter.currentBootId?.() ?? currentBootId();
+  }
+
+  private registrySweepOptions(): RegistrySweepOptions {
+    return {
+      currentBootId: this.getCurrentBootId(),
+      isProcessRunning: (record) => this.isRegistryProcessRunning(record),
+      cleanupRecord: (record) => this.cleanupManagedRecord(record),
+    };
+  }
+
+  private sweepRegistry() {
+    this.registry.sweep(this.registrySweepOptions());
+  }
+
+  private findProcessById(processId: number): StudioProcessInfo | undefined {
+    return this.listStudioProcesses().find((proc) => proc.Id === processId);
+  }
+
+  private isRegistryProcessRunning(record: ManagedInstanceRegistryRecord): boolean {
+    const processId = record.nativeProcessId ?? record.spawnPid;
+    if (!processId) return true;
+    const studioProcess = this.findProcessById(processId);
+    return !!studioProcess && this.verifyProcessForRecord(this.fromRegistryRecord(record), studioProcess);
+  }
+
+  private verifyProcessForRecord(record: ManagedStudioInstance, studioProcess: StudioProcessInfo): boolean {
+    const processName = `${studioProcess.Name ?? ''} ${studioProcess.Path ?? ''}`.toLowerCase();
+    if (!processName.includes('robloxstudio')) return false;
+
+    const processId = record.nativeProcessId ?? record.spawnPid;
+    if (record.spawnPid && record.spawnPid === processId && studioProcess.Id === processId) return true;
+
+    const processPath = studioProcess.Path ? path.normalize(studioProcess.Path).toLowerCase() : '';
+    const exePath = record.exe ? path.normalize(record.exe).toLowerCase() : '';
+    if (processPath && exePath && (processPath === exePath || basenameAny(processPath) === basenameAny(exePath))) {
+      return true;
+    }
+
+    const commandLine = studioProcess.CommandLine ?? '';
+    if (record.localPlaceFile && commandLine.includes(path.basename(record.localPlaceFile))) return true;
+    if (record.placeId !== undefined && commandLine.includes(String(record.placeId))) return true;
+
+    return false;
+  }
+
+  private cleanupManagedRecord(record: { source: string; localPlaceFile?: string }) {
+    if (record.source !== 'baseplate') return;
+    cleanupManagedBaseplateFiles({ source: 'baseplate', localPlaceFile: record.localPlaceFile });
+  }
+
+  private markClosedInMemory(record: ManagedStudioInstance) {
+    record.closedAt = record.closedAt ?? Date.now();
+    if (record.instanceId) this.managedByInstanceId.delete(record.instanceId);
+    this.pending.delete(record);
+  }
+
+  private markClosedInRegistry(record: ManagedStudioInstance) {
+    if (record.recordId) this.registry.markClosed(record.recordId, record.closedAt ?? Date.now());
+  }
+
+  private toRegistryRecord(record: ManagedStudioInstance): ManagedInstanceRegistryRecord {
+    if (!record.recordId) throw new Error('Managed Studio record is missing recordId.');
+    if (!record.bootId) throw new Error('Managed Studio record is missing bootId.');
+    return {
+      version: 1,
+      recordId: record.recordId,
+      instanceId: record.instanceId,
+      source: record.source,
+      nativeProcessId: record.nativeProcessId,
+      spawnPid: record.spawnPid,
+      exe: record.exe,
+      args: record.args,
+      placeId: record.placeId,
+      universeId: record.universeId,
+      placeVersion: record.placeVersion,
+      localPlaceFile: record.localPlaceFile,
+      deleteLocalPlaceFileOnClose: record.deleteLocalPlaceFileOnClose,
+      launchedAt: record.launchedAt,
+      attachedAt: record.instanceId ? Date.now() : undefined,
+      closedAt: record.closedAt,
+      ownerPid: record.ownerPid,
+      bootId: record.bootId,
+    };
+  }
+
+  private fromRegistryRecord(record: ManagedInstanceRegistryRecord): ManagedStudioInstance {
+    return {
+      recordId: record.recordId,
+      source: record.source as StudioLaunchSource,
+      instanceId: record.instanceId,
+      nativeProcessId: record.nativeProcessId,
+      spawnPid: record.spawnPid,
+      exe: record.exe,
+      args: record.args,
+      placeId: record.placeId,
+      universeId: record.universeId,
+      placeVersion: record.placeVersion,
+      localPlaceFile: record.localPlaceFile,
+      launchedAt: record.launchedAt,
+      closedAt: record.closedAt,
+      ownerPid: record.ownerPid,
+      bootId: record.bootId,
+      deleteLocalPlaceFileOnClose: record.deleteLocalPlaceFileOnClose,
+    };
   }
 }
