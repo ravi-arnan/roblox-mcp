@@ -564,15 +564,78 @@ function getProjectStructure(requestData: Record<string, unknown>) {
 	return result;
 }
 
+// Split a Lua pattern on TOP-LEVEL "|" into alternatives. Lua patterns have no
+// alternation operator, so "foo|bar" would otherwise be matched as the literal
+// text "foo|bar" and silently never hit. "%|" stays a literal pipe, and "%bxy"
+// keeps both balanced-match delimiter characters.
+function splitLuaAlternation(pattern: string): string[] {
+	const parts: string[] = [];
+	let current = "";
+	let i = 1;
+	const n = pattern.size();
+	let inCharClass = false;
+	while (i <= n) {
+		const c = string.sub(pattern, i, i);
+		if (c === "%") {
+			if (string.sub(pattern, i + 1, i + 1) === "b") {
+				current += string.sub(pattern, i, math.min(i + 3, n));
+				i += 4;
+				continue;
+			}
+			// Preserve an escape pair (e.g. %|, %., %d) intact.
+			current += string.sub(pattern, i, i + 1);
+			i += 2;
+		} else if (c === "[") {
+			inCharClass = true;
+			current += c;
+			i += 1;
+		} else if (c === "]") {
+			inCharClass = false;
+			current += c;
+			i += 1;
+		} else if (c === "|" && !inCharClass) {
+			parts.push(current);
+			current = "";
+			i += 1;
+		} else {
+			current += c;
+			i += 1;
+		}
+	}
+	parts.push(current);
+	return parts;
+}
+
+// Return the earliest match across alternatives (mirrors regex alternation).
+function findFirstPattern(line: string, alternatives: string[]): [number | undefined, number | undefined] {
+	let bestStart: number | undefined;
+	let bestEnd: number | undefined;
+	for (const alt of alternatives) {
+		if (alt === "") continue;
+		const [s, e] = string.find(line, alt);
+		if (s !== undefined && (bestStart === undefined || s < bestStart)) {
+			bestStart = s;
+			bestEnd = e as number;
+		}
+	}
+	return [bestStart, bestEnd];
+}
+
 function grepScripts(requestData: Record<string, unknown>) {
 	const pattern = requestData.pattern as string;
 	if (!pattern) return { error: "pattern is required" };
 
-	const caseSensitive = (requestData.caseSensitive as boolean) ?? false;
+	const usePattern = (requestData.usePattern as boolean) ?? false;
+	if (usePattern && requestData.caseSensitive === false) {
+		return {
+			error: "Case-insensitive Lua pattern search is not supported. Omit caseSensitive or pass caseSensitive: true with usePattern: true, or use literal search.",
+		};
+	}
+
+	const caseSensitive = usePattern ? true : ((requestData.caseSensitive as boolean) ?? false);
 	const contextLines = (requestData.contextLines as number) ?? 0;
 	const maxResults = (requestData.maxResults as number) ?? 100;
 	const maxResultsPerScript = (requestData.maxResultsPerScript as number) ?? 0;
-	const usePattern = (requestData.usePattern as boolean) ?? false;
 	const filesOnly = (requestData.filesOnly as boolean) ?? false;
 	const searchPath = (requestData.path as string) ?? "";
 	const classFilter = requestData.classFilter as string | undefined;
@@ -582,6 +645,8 @@ function grepScripts(requestData: Record<string, unknown>) {
 
 	// Prepare pattern for matching
 	const searchPattern = caseSensitive ? pattern : pattern.lower();
+	// Pre-split top-level "|" alternation once (pattern mode only).
+	const patternAlternatives = usePattern ? splitLuaAlternation(searchPattern) : undefined;
 
 	interface LineMatch {
 		line: number;
@@ -630,7 +695,7 @@ function grepScripts(requestData: Record<string, unknown>) {
 				let matchEnd: number | undefined;
 
 				if (usePattern) {
-					[matchStart, matchEnd] = string.find(searchLine, searchPattern);
+					[matchStart, matchEnd] = findFirstPattern(searchLine, patternAlternatives!);
 				} else {
 					[matchStart, matchEnd] = string.find(searchLine, searchPattern, 1, true);
 				}

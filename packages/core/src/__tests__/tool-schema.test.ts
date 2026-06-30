@@ -54,6 +54,7 @@ describe('Tool schema compatibility', () => {
 
     const multiplayerProps = (TOOL_DEFINITIONS.find(tool => tool.name === 'multiplayer_playtest')!.inputSchema as { properties?: Record<string, any>; required?: string[] }).properties ?? {};
     expect((multiplayerProps.action as { enum?: string[] }).enum).toEqual(['start', 'status', 'add_players', 'leave_client', 'end']);
+    expect(multiplayerProps.force).toMatchObject({ type: 'boolean' });
     expect((TOOL_DEFINITIONS.find(tool => tool.name === 'multiplayer_playtest')!.inputSchema as { required?: string[] }).required).toEqual(['action']);
 
     for (const name of [
@@ -69,6 +70,46 @@ describe('Tool schema compatibility', () => {
       expect(deprecatedNames.has(name)).toBe(true);
       expect(callableNames.has(name)).toBe(true);
     }
+
+    const deprecatedStartProps = (DEPRECATED_TOOL_DEFINITIONS.find(tool => tool.name === 'multiplayer_test_start')!.inputSchema as { properties?: Record<string, any> }).properties ?? {};
+    expect(deprecatedStartProps.force).toMatchObject({ type: 'boolean' });
+  });
+
+  test('grep_scripts exposes one explicit pattern-mode switch', () => {
+    const grep = TOOL_DEFINITIONS.find(tool => tool.name === 'grep_scripts')!;
+    const props = (grep.inputSchema as { properties?: Record<string, any> }).properties ?? {};
+
+    expect(props.usePattern).toMatchObject({ type: 'boolean' });
+    expect(props.isRegex).toBeUndefined();
+    expect(props.caseSensitive.description).toContain('Lua pattern mode is always case-sensitive');
+  });
+
+  test('get_script_source exposes only line_range for range selection', () => {
+    const tool = TOOL_DEFINITIONS.find(tool => tool.name === 'get_script_source');
+    expect(tool).toBeDefined();
+    const props = (tool!.inputSchema as { properties?: Record<string, unknown> }).properties ?? {};
+
+    expect(Object.keys(props).sort()).toEqual(['instancePath', 'instance_id', 'line_range']);
+    expect(props).not.toHaveProperty('startLine');
+    expect(props).not.toHaveProperty('endLine');
+    expect(props).not.toHaveProperty('lineRange');
+  });
+
+  test('script line tools expose line_range instead of startLine/endLine', () => {
+    for (const name of ['edit_script_lines', 'delete_script_lines']) {
+      const tool = TOOL_DEFINITIONS.find(tool => tool.name === name);
+      expect(tool).toBeDefined();
+      const schema = tool!.inputSchema as { properties?: Record<string, unknown>; required?: string[] };
+      const props = schema.properties ?? {};
+
+      expect(props).toHaveProperty('line_range');
+      expect(props).not.toHaveProperty('startLine');
+      expect(props).not.toHaveProperty('endLine');
+      expect(props).not.toHaveProperty('lineRange');
+    }
+
+    const deleteRequired = (TOOL_DEFINITIONS.find(tool => tool.name === 'delete_script_lines')!.inputSchema as { required?: string[] }).required ?? [];
+    expect(deleteRequired).toEqual(['instancePath', 'line_range']);
   });
 
   // Tools that don't dispatch to Studio (asset uploads, local file ops, build

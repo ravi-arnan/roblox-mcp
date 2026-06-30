@@ -1,5 +1,5 @@
 import request from 'supertest';
-import { createHttpServer } from '../http-server.js';
+import { TOOL_HANDLERS, createHttpServer } from '../http-server.js';
 import { RobloxStudioTools } from '../tools/index.js';
 import { BridgeService } from '../bridge-service.js';
 import { Application } from 'express';
@@ -38,6 +38,145 @@ describe('HTTP Server', () => {
         pluginConnected: false,
         mcpServerActive: false,
       });
+    });
+  });
+
+  describe('Tool Handlers', () => {
+    test('get_script_source only accepts line_range for range selection', async () => {
+      const getScriptSource = jest.fn(async () => ({ content: [] }));
+      const fakeTools = { getScriptSource } as unknown as RobloxStudioTools;
+
+      await TOOL_HANDLERS.get_script_source(fakeTools, {
+        instancePath: 'game.ServerScriptService.Main',
+        line_range: '10-12',
+        instance_id: 'place:test',
+      });
+      expect(getScriptSource).toHaveBeenLastCalledWith('game.ServerScriptService.Main', 10, 12, 'place:test');
+
+      await TOOL_HANDLERS.get_script_source(fakeTools, {
+        instancePath: 'game.ServerScriptService.Main',
+        startLine: 20,
+        endLine: 25,
+        lineRange: '30-35',
+        instance_id: 'place:test',
+      });
+      expect(getScriptSource).toHaveBeenLastCalledWith('game.ServerScriptService.Main', undefined, undefined, 'place:test');
+    });
+
+    test('script line tools parse line_range through the shared handler helpers', async () => {
+      const editScriptLines = jest.fn(async () => ({ content: [] }));
+      const deleteScriptLines = jest.fn(async () => ({ content: [] }));
+      const fakeTools = { editScriptLines, deleteScriptLines } as unknown as RobloxStudioTools;
+
+      await TOOL_HANDLERS.edit_script_lines(fakeTools, {
+        instancePath: 'game.ServerScriptService.Main',
+        old_string: 'old',
+        new_string: 'new',
+        line_range: '42',
+        instance_id: 'place:test',
+      });
+      expect(editScriptLines).toHaveBeenLastCalledWith('game.ServerScriptService.Main', 'old', 'new', 42, 'place:test');
+
+      await TOOL_HANDLERS.delete_script_lines(fakeTools, {
+        instancePath: 'game.ServerScriptService.Main',
+        line_range: '10-12',
+        instance_id: 'place:test',
+      });
+      expect(deleteScriptLines).toHaveBeenLastCalledWith('game.ServerScriptService.Main', 10, 12, 'place:test');
+
+      await TOOL_HANDLERS.edit_script_lines(fakeTools, {
+        instancePath: 'game.ServerScriptService.Main',
+        old_string: 'old',
+        new_string: 'new',
+        startLine: 99,
+        instance_id: 'place:test',
+      });
+      expect(editScriptLines).toHaveBeenLastCalledWith('game.ServerScriptService.Main', 'old', 'new', undefined, 'place:test');
+    });
+
+    test('script line tools reject unsupported line_range shapes', async () => {
+      const editScriptLines = jest.fn(async () => ({ content: [] }));
+      const deleteScriptLines = jest.fn(async () => ({ content: [] }));
+      const fakeTools = { editScriptLines, deleteScriptLines } as unknown as RobloxStudioTools;
+
+      await expect(Promise.resolve().then(() => TOOL_HANDLERS.edit_script_lines(fakeTools, {
+        instancePath: 'game.ServerScriptService.Main',
+        old_string: 'old',
+        new_string: 'new',
+        line_range: '10-12',
+      }))).rejects.toThrow(/single line/);
+      expect(editScriptLines).not.toHaveBeenCalled();
+
+      await expect(Promise.resolve().then(() => TOOL_HANDLERS.delete_script_lines(fakeTools, {
+        instancePath: 'game.ServerScriptService.Main',
+        line_range: '10-',
+      }))).rejects.toThrow(/requires line_range/);
+      expect(deleteScriptLines).not.toHaveBeenCalled();
+
+      await expect(Promise.resolve().then(() => TOOL_HANDLERS.delete_script_lines(fakeTools, {
+        instancePath: 'game.ServerScriptService.Main',
+        line_range: '0',
+      }))).rejects.toThrow(/line_range must/);
+      expect(deleteScriptLines).not.toHaveBeenCalled();
+
+      await expect(Promise.resolve().then(() => TOOL_HANDLERS.delete_script_lines(fakeTools, {
+        instancePath: 'game.ServerScriptService.Main',
+        line_range: '12-10',
+      }))).rejects.toThrow(/line_range must/);
+      expect(deleteScriptLines).not.toHaveBeenCalled();
+
+      await expect(Promise.resolve().then(() => TOOL_HANDLERS.delete_script_lines(fakeTools, {
+        instancePath: 'game.ServerScriptService.Main',
+        startLine: 10,
+        endLine: 12,
+      }))).rejects.toThrow(/requires line_range/);
+      expect(deleteScriptLines).not.toHaveBeenCalled();
+    });
+
+    test('multiplayer handlers forward force for explicit hazardous start', async () => {
+      const multiplayerPlaytest = jest.fn(async () => ({ content: [] }));
+      const multiplayerTestStart = jest.fn(async () => ({ content: [] }));
+      const fakeTools = { multiplayerPlaytest, multiplayerTestStart } as unknown as RobloxStudioTools;
+
+      await TOOL_HANDLERS.multiplayer_playtest(fakeTools, {
+        action: 'start',
+        numPlayers: 2,
+        timeout: 5,
+        instance_id: 'place:test',
+        force: true,
+      });
+      expect(multiplayerPlaytest).toHaveBeenLastCalledWith('start', 2, undefined, undefined, undefined, 5, 'place:test', true);
+
+      await TOOL_HANDLERS.multiplayer_test_start(fakeTools, {
+        numPlayers: 2,
+        timeout: 5,
+        instance_id: 'place:test',
+        force: true,
+      });
+      expect(multiplayerTestStart).toHaveBeenLastCalledWith(2, undefined, 5, 'place:test', true);
+    });
+
+    test('grep_scripts uses only usePattern for pattern mode', async () => {
+      const grepScripts = jest.fn(async () => ({ content: [] }));
+      const fakeTools = { grepScripts } as unknown as RobloxStudioTools;
+
+      await TOOL_HANDLERS.grep_scripts(fakeTools, {
+        pattern: 'foo|bar',
+        isRegex: true,
+        instance_id: 'place:test',
+      });
+      expect(grepScripts).toHaveBeenLastCalledWith('foo|bar', expect.objectContaining({
+        usePattern: undefined,
+      }), 'place:test');
+
+      await TOOL_HANDLERS.grep_scripts(fakeTools, {
+        pattern: 'foo|bar',
+        usePattern: true,
+        instance_id: 'place:test',
+      });
+      expect(grepScripts).toHaveBeenLastCalledWith('foo|bar', expect.objectContaining({
+        usePattern: true,
+      }), 'place:test');
     });
   });
 

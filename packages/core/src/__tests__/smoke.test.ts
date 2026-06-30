@@ -979,6 +979,34 @@ describe('Smoke', () => {
     expect(tools.resolveImageId).not.toHaveBeenCalled();
   });
 
+  test('get_script_source shows plugin truncation range and note', async () => {
+    const bridge = new BridgeService();
+    const tools = new RobloxStudioTools(bridge);
+    bridge.registerInstance(READY);
+
+    const resultPromise = tools.getScriptSource('game.ServerScriptService.Manager', undefined, undefined, 'place:test');
+    const pending = bridge.getPendingRequest('place:test', 'edit');
+    expect(pending?.request.endpoint).toBe('/api/get-script-source');
+    bridge.resolveRequest(pending!.requestId, {
+      success: true,
+      instancePath: 'game.ServerScriptService.Manager',
+      className: 'Script',
+      topService: 'ServerScriptService',
+      lineCount: 1700,
+      startLine: 1,
+      endLine: 300,
+      truncated: true,
+      note: 'Truncated to first 300 lines; use line_range to read more.',
+      numberedSource: '1  print("start")\n300 print("still here")',
+    });
+
+    const result = await resultPromise;
+    const text = result.content[0].text;
+    expect(text).toContain('Lines:    1700 total (showing 1-300)');
+    expect(text).toContain('Note:     Truncated to first 300 lines; use line_range to read more.');
+    expect(text).not.toContain('Truncated to first 1000 lines');
+  });
+
   test('start_playtest reports already running when runtime peers are connected', async () => {
     const bridge = new BridgeService();
     const tools = new RobloxStudioTools(bridge);
@@ -1381,6 +1409,158 @@ describe('Smoke', () => {
       clientRoles: ['client-1'],
       playerCount: 1,
     });
+  });
+
+  test('multiplayer_playtest start requires force before launching hazardous StudioTestService sessions', async () => {
+    const bridge = new BridgeService();
+    const tools = new RobloxStudioTools(bridge);
+    bridge.registerInstance(READY);
+
+    const result = await tools.multiplayerPlaytest('start', 1, undefined, undefined, undefined, 1, 'place:test');
+    const body = JSON.parse(result.content[0].text);
+
+    expect(body).toMatchObject({
+      success: false,
+      action: 'start',
+      error: 'multiplayer_force_required',
+      requiresForce: true,
+      manualCleanupRequired: true,
+    });
+    expect(bridge.getPendingRequest('place:test', 'edit')).toBeNull();
+  });
+
+  test('multiplayer_playtest forced start waits for detected server and client peers', async () => {
+    const bridge = new BridgeService();
+    const tools = new RobloxStudioTools(bridge) as any;
+    tools._buildMultiplayerState = async () => ({
+      peers: [{ role: 'edit' }, { role: 'server' }, { role: 'client-1' }],
+      clientRoles: ['client-1'],
+      playerCount: 1,
+    });
+    bridge.registerInstance(READY);
+
+    const resultPromise = tools.multiplayerPlaytest('start', 1, undefined, undefined, undefined, 2, 'place:test', true);
+    const pending = bridge.getPendingRequest('place:test', 'edit');
+    expect(pending?.request).toMatchObject({
+      endpoint: '/api/multiplayer-test-start',
+      data: { numPlayers: 1, testArgs: {} },
+    });
+    bridge.resolveRequest(pending!.requestId, {
+      success: true,
+      message: 'Multiplayer Studio test starting with 1 player(s).',
+    });
+    bridge.registerInstance({
+      pluginSessionId: 'server-1',
+      instanceId: 'place:test',
+      role: 'server',
+      placeId: 0,
+      placeName: 'Game',
+      dataModelName: 'Game',
+      isRunning: true,
+    });
+    bridge.registerInstance({
+      pluginSessionId: 'client-1',
+      instanceId: 'place:test',
+      role: 'client',
+      placeId: 0,
+      placeName: 'Game',
+      dataModelName: 'Game',
+      isRunning: true,
+    });
+
+    const result = await resultPromise;
+    const body = JSON.parse(result.content[0].text);
+    expect(body).toMatchObject({
+      success: true,
+      action: 'start',
+      ready: true,
+      manualCleanupRequired: true,
+      roles: expect.arrayContaining(['edit', 'server', 'client-1']),
+    });
+  });
+
+  test('multiplayer start reports failure when peers are not detected before timeout', async () => {
+    const bridge = new BridgeService();
+    const tools = new RobloxStudioTools(bridge) as any;
+    tools._buildMultiplayerState = async () => ({
+      peers: [{ role: 'edit' }],
+      clientRoles: [],
+      playerCount: 0,
+    });
+    bridge.registerInstance(READY);
+
+    const resultPromise = tools.multiplayerPlaytest('start', 1, undefined, undefined, undefined, 0.1, 'place:test', true);
+    const pending = bridge.getPendingRequest('place:test', 'edit');
+    bridge.resolveRequest(pending!.requestId, {
+      success: true,
+      message: 'Multiplayer Studio test starting with 1 player(s).',
+    });
+
+    const result = await resultPromise;
+    const body = JSON.parse(result.content[0].text);
+    expect(body).toMatchObject({
+      success: false,
+      action: 'start',
+      error: 'multiplayer_start_not_detected',
+      manualCleanupRequired: true,
+    });
+  });
+
+  test('multiplayer stop/end is disabled and does not call EndTest', async () => {
+    const bridge = new BridgeService();
+    const tools = new RobloxStudioTools(bridge);
+    bridge.registerInstance(READY);
+    bridge.registerInstance({
+      pluginSessionId: 'server-1',
+      instanceId: 'place:test',
+      role: 'server',
+      placeId: 0,
+      placeName: 'Game',
+      dataModelName: 'Game',
+      isRunning: true,
+    });
+
+    const wrapperResult = await tools.multiplayerPlaytest('end', undefined, undefined, undefined, 'done', 1, 'place:test');
+    const wrapperBody = JSON.parse(wrapperResult.content[0].text);
+    expect(wrapperBody).toMatchObject({
+      success: false,
+      action: 'end',
+      error: 'multiplayer_stop_disabled',
+      manualCleanupRequired: true,
+    });
+
+    const rawResult = await tools.multiplayerTestEnd('done', 1, 'place:test');
+    const rawBody = JSON.parse(rawResult.content[0].text);
+    expect(rawBody).toMatchObject({
+      success: false,
+      error: 'multiplayer_stop_disabled',
+      manualCleanupRequired: true,
+    });
+    expect(bridge.getPendingRequest('place:test', 'server')).toBeNull();
+  });
+
+  test('multiplayer start keeps waiting when edit phase completes before peers register', async () => {
+    const bridge = new BridgeService();
+    const tools = new RobloxStudioTools(bridge) as any;
+    const exactChecks = jest.fn()
+      .mockResolvedValueOnce({ ok: false, roles: ['edit'], timedOut: true })
+      .mockResolvedValueOnce({ ok: true, roles: ['edit', 'server', 'client-1'], timedOut: false });
+    tools._waitForExactClientCount = exactChecks;
+    tools.client = {
+      request: jest.fn(async () => ({
+        session: { phase: 'completed' },
+      })),
+    };
+
+    const result = await tools._waitForMultiplayerStart('place:test', 1, 1);
+
+    expect(result).toEqual({
+      ok: true,
+      roles: ['edit', 'server', 'client-1'],
+      timedOut: false,
+      error: undefined,
+    });
+    expect(exactChecks).toHaveBeenCalledTimes(2);
   });
 
   test('get_scene_analysis fans out to connected peers', async () => {

@@ -6,6 +6,10 @@ const ScriptEditorService = game.GetService("ScriptEditorService");
 const { getInstancePath, getInstanceByPath, readScriptSource, splitLines, joinLines } = Utils;
 const { beginRecording, finishRecording } = Recording;
 
+const SOURCE_TRUNCATE_CHAR_BUDGET = 25000;
+const SOURCE_TRUNCATE_LINE_BUDGET = 400;
+const SOURCE_TRUNCATE_TO_LINES = 300;
+
 function normalizeEscapes(s: string): string {
 	let result = s;
 	result = result.gsub("\\\\", "\x01")[0];
@@ -15,6 +19,30 @@ function normalizeEscapes(s: string): string {
 	result = result.gsub('\\"', '"')[0];
 	result = result.gsub("\x01", "\\")[0];
 	return result;
+}
+
+function getTopServiceName(instance: Instance): string {
+	let topServiceInst: Instance = instance;
+	while (topServiceInst.Parent && topServiceInst.Parent !== game) {
+		topServiceInst = topServiceInst.Parent;
+	}
+	return topServiceInst.Name;
+}
+
+function sliceLines(lines: string[], startLine: number, endLine: number): string[] {
+	const selectedLines: string[] = [];
+	for (let i = startLine; i <= endLine; i++) {
+		selectedLines.push(lines[i - 1] ?? "");
+	}
+	return selectedLines;
+}
+
+function numberLines(lines: string[], lineOffset: number): string {
+	const numberedLines: string[] = [];
+	for (let i = 0; i < lines.size(); i++) {
+		numberedLines.push(`${i + lineOffset}: ${lines[i]}`);
+	}
+	return numberedLines.join("\n");
 }
 
 function getScriptSource(requestData: Record<string, unknown>) {
@@ -34,74 +62,43 @@ function getScriptSource(requestData: Record<string, unknown>) {
 		const fullSource = readScriptSource(instance);
 		const [lines, hasTrailingNewline] = splitLines(fullSource);
 		const totalLineCount = lines.size();
-
-		let sourceToReturn = fullSource;
-		let returnedStartLine = 1;
-		let returnedEndLine = totalLineCount;
-
-		if (startLine !== undefined || endLine !== undefined) {
-			const actualStartLine = math.max(1, startLine ?? 1);
-			const actualEndLine = math.min(lines.size(), endLine ?? lines.size());
-
-			const selectedLines: string[] = [];
-			for (let i = actualStartLine; i <= actualEndLine; i++) {
-				selectedLines.push(lines[i - 1] ?? "");
-			}
-
-			sourceToReturn = selectedLines.join("\n");
-			if (hasTrailingNewline && actualEndLine === lines.size() && sourceToReturn.sub(-1) !== "\n") {
-				sourceToReturn += "\n";
-			}
-			returnedStartLine = actualStartLine;
-			returnedEndLine = actualEndLine;
-		}
-
-		const numberedLines: string[] = [];
-		const linesToNumber = startLine !== undefined ? splitLines(sourceToReturn)[0] : lines;
-		const lineOffset = returnedStartLine - 1;
-		for (let i = 0; i < linesToNumber.size(); i++) {
-			numberedLines.push(`${i + 1 + lineOffset}: ${linesToNumber[i]}`);
-		}
-		const numberedSource = numberedLines.join("\n");
+		const explicitRange = startLine !== undefined || endLine !== undefined;
+		const shouldTruncate = !explicitRange &&
+			(fullSource.size() > SOURCE_TRUNCATE_CHAR_BUDGET || totalLineCount > SOURCE_TRUNCATE_LINE_BUDGET);
+		const returnedStartLine = explicitRange ? math.max(1, startLine ?? 1) : 1;
+		const returnedEndLine = shouldTruncate
+			? math.min(SOURCE_TRUNCATE_TO_LINES, totalLineCount)
+			: explicitRange ? math.min(totalLineCount, endLine ?? totalLineCount) : totalLineCount;
+		const selectedLines = (explicitRange || shouldTruncate)
+			? sliceLines(lines, returnedStartLine, returnedEndLine)
+			: lines;
+		const sourceToReturn = explicitRange
+			? joinLines(selectedLines, hasTrailingNewline && returnedEndLine === totalLineCount)
+			: shouldTruncate ? selectedLines.join("\n") : fullSource;
 
 		const resp: Record<string, unknown> = {
 			instancePath,
 			className: instance.ClassName,
 			name: instance.Name,
 			source: sourceToReturn,
-			numberedSource,
+			numberedSource: numberLines(selectedLines, returnedStartLine),
 			sourceLength: fullSource.size(),
 			lineCount: totalLineCount,
 			startLine: returnedStartLine,
 			endLine: returnedEndLine,
-			isPartial: startLine !== undefined || endLine !== undefined,
-			truncated: false,
+			isPartial: explicitRange,
+			truncated: shouldTruncate,
 		};
 
-		if (startLine === undefined && endLine === undefined && fullSource.size() > 50000) {
-			const truncatedLines: string[] = [];
-			const truncatedNumberedLines: string[] = [];
-			const maxLines = math.min(1000, lines.size());
-			for (let i = 0; i < maxLines; i++) {
-				truncatedLines.push(lines[i]);
-				truncatedNumberedLines.push(`${i + 1}: ${lines[i]}`);
-			}
-			resp.source = truncatedLines.join("\n");
-			resp.numberedSource = truncatedNumberedLines.join("\n");
-			resp.truncated = true;
-			resp.endLine = maxLines;
-			resp.note = "Script truncated to first 1000 lines. Use startLine/endLine parameters to read specific sections.";
+		if (shouldTruncate) {
+			resp.note = `Script truncated to first ${returnedEndLine} of ${totalLineCount} lines (${fullSource.size()} chars). Use line_range to read specific sections.`;
 		}
 
 		if (instance.IsA("BaseScript")) {
 			resp.enabled = instance.Enabled;
 		}
 
-		let topServiceInst: Instance = instance;
-		while (topServiceInst.Parent && topServiceInst.Parent !== game) {
-			topServiceInst = topServiceInst.Parent;
-		}
-		resp.topService = topServiceInst.Name;
+		resp.topService = getTopServiceName(instance);
 
 		return resp;
 	});
