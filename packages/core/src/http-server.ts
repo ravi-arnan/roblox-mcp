@@ -13,6 +13,7 @@ import { RobloxStudioTools } from './tools/index.js';
 import { BridgeService, RoutingFailure, toPublic } from './bridge-service.js';
 import type { RegisterInstanceResult } from './bridge-service.js';
 import type { ToolDefinition } from './tools/definitions.js';
+import { registerEmptyResourceShim } from './mcp-compat.js';
 
 interface StreamableHttpConfig {
   name: string;
@@ -530,6 +531,8 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
           { name: serverConfig.name, version: serverConfig.version },
           { capabilities: { tools: {} } }
         );
+
+        registerEmptyResourceShim(server);
 
         server.setRequestHandler(ListToolsRequestSchema, async () => ({
           tools: filteredTools.map(t => ({
